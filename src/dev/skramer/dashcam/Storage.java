@@ -219,6 +219,21 @@ final class Storage {
         }
     }
 
+    /**
+     * Keeps the size limit's count right when the save button moves a segment into Saved: its
+     * bytes still count, now as saved ones, and the oldest-first deletion no longer sees it.
+     */
+    synchronized void saved(File moved) {
+        String name = moved.getName();
+        long bytes = moved.length();
+        if (current != null && current.getName().equals(name)) current = null;  // never counted yet
+        else if (loop != null) {
+            Long was = loop.remove(name);
+            if (was != null) loopBytes -= was;
+        }
+        if (loop != null) otherBytes += bytes;
+    }
+
     /** Keeps the size limit's count right when keepFree deletes a segment. */
     private synchronized void forget(String name, long bytes) {
         if (loop != null && loop.remove(name) != null) loopBytes -= bytes;

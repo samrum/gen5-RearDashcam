@@ -66,7 +66,8 @@ public final class StorageLimitTest {
         for (int i = 0; i < 10; i++) write(new File(dir, "20261101_00000" + i + ".ts"), 100);
         write(new File(dir, "Saved/20261031_000000.ts"), 120);
         write(new File(dir, "Snapshots/x.jpg"), 30);
-        Storage s = new Storage(config(dir, 600));
+        Config ca = config(dir, 600);
+        Storage s = new Storage(ca);
         settle(s);
         check(Arrays.equals(segments(dir), new String[] {"20261101_000006.ts", "20261101_000007.ts",
                 "20261101_000008.ts", "20261101_000009.ts"}), "oldest go first: " + Arrays.toString(segments(dir)));
@@ -84,6 +85,25 @@ public final class StorageLimitTest {
         write(next, 100);
         s.makeRoom();
         check(segments(dir).length == 4, "a missing file frees its space: " + Arrays.toString(segments(dir)));
+
+        // Saving moves segments into Saved: they still count, and the oldest go to make up for them.
+        // State: 8, 9 and two new 100-byte segments (400) + 150 saved. Move two: 200 loop + 350 saved.
+        String[] before = segments(dir);
+        for (int i = 2; i < 4; i++) {
+            File to = new File(dir, "Saved/" + before[i]);
+            check(new File(dir, before[i]).renameTo(to), "test setup");
+            s.saved(to);
+        }
+        next = s.newSegment();
+        write(next, 100);
+        s.makeRoom();  // 300 loop + 350 saved + 11 > 600: the oldest goes
+        check(segments(dir).length == 2 && !new File(dir, before[0]).exists(), "saved segments still count: " + Arrays.toString(segments(dir)));
+        check(new File(dir, "Saved/" + before[2]).isFile() && new File(dir, "Saved/" + before[3]).isFile(), "saved segments are kept");
+        // Down to 400: 350 saved + 11 leaves no room, so both remaining segments go, not just one.
+        ca.maxBytes = 400;
+        s.makeRoom();
+        check(segments(dir).length == 0, "moved segments aren't taken off twice: " + Arrays.toString(segments(dir)));
+        ca.maxBytes = 600;
 
         // Raising the limit takes effect without deleting; no limit leaves everything.
         File b = new File(root, "b");
