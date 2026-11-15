@@ -59,6 +59,12 @@ final class Guard extends Thread {
     private static final long WRITING_MS = 3000;
     /** The ignition reading off this many polls in a row (about a second) means the car is off. */
     private static final int IGNITION_OFF_POLLS = 4;
+    /**
+     * The main thread opens, hands off and releases the camera. If it hasn't run a check-in for
+     * this long, the heartbeat stops so the watchdog kills the process; in reverse, much sooner,
+     * the process kills itself: a camera call hung there would keep the stock view out.
+     */
+    private static final long MAIN_STALL_MS = 5000, REVERSE_MAIN_STALL_MS = 1000;
 
     private final Config config;
     private final Recorder recorder;
@@ -104,6 +110,15 @@ final class Guard extends Thread {
         }
     };
     private volatile long lastBlockMs = -SETTLE_MS;
+    /** Uptime of the main-thread check-in waiting to run, or 0 if none is. */
+    private volatile long mainCheckPostedMs;
+    private final Runnable mainCheck = new Runnable() {
+        @Override
+        public void run() {
+            mainCheckPostedMs = 0;
+        }
+    };
+    private boolean mainStallLogged;
     private boolean disabled;
     private long appConfModified, appConfLength;
     private int lastGear = -1;
@@ -148,6 +163,7 @@ final class Guard extends Thread {
         for (long beat = 0; ; ) {
             try {
                 long now = SystemClock.uptimeMillis();
+                long mainStalled = mainStalledMs(now);
                 int gear = gear();
                 if (gear != lastGear) {
                     Log.i("gear status " + gear);
@@ -156,6 +172,9 @@ final class Guard extends Thread {
                 if (gear == GEAR_REVERSE) {
                     mirror.allow(false);
                     lastBlockMs = now;
+                    if (mainStalled >= REVERSE_MAIN_STALL_MS) {
+                        dieForReverse("the main thread has been stuck for " + mainStalled + " ms in reverse");
+                    }
                     if (recorder.isActive() && !recorder.isPassive()) handOff("reverse");
                 }
                 if (now < nextStatePoll) {
@@ -237,7 +256,15 @@ final class Guard extends Thread {
                 mirror.recording(writing ? MirrorFeed.RECORDING : disabled ? MirrorFeed.DISABLED
                         : !driveMounted ? MirrorFeed.NO_DRIVE : MirrorFeed.OTHER);
                 mirror.allow(!carOff && !blocked && !unsupported && recorder.isActive() && !recorder.isPassive());
-                if (beat % 4 == 0) writeHeartbeat(beat / 4);
+                if (beat % 4 == 0) {
+                    if (mainStalled < MAIN_STALL_MS) {
+                        writeHeartbeat(beat / 4);
+                        mainStallLogged = false;
+                    } else if (!mainStallLogged) {
+                        Log.w("the main thread has been stuck for " + mainStalled + " ms; stopping the heartbeat");
+                        mainStallLogged = true;
+                    }
+                }
                 beat++;
                 SystemClock.sleep(recorder.isActive() && !recorder.isPassive() ? POLL_MS : STATE_POLL_MS);
             } catch (Throwable t) {
@@ -313,6 +340,24 @@ final class Guard extends Thread {
         awaitRelease(done);
     }
 
+    /**
+     * How long the main thread has left a check-in waiting, posting a new one if none is: 0
+     * while it keeps up. A camera call that hangs there (open, start, release) shows up here.
+     */
+    private long mainStalledMs(long now) {
+        long posted = mainCheckPostedMs;
+        if (posted != 0) return now - posted;
+        mainCheckPostedMs = now;
+        main.post(mainCheck);
+        return 0;
+    }
+
+    /** Exits, which frees the camera for the stock view; the service script starts the recorder again. */
+    private static void dieForReverse(String why) {
+        Log.e(why + "; exiting to free the camera", null);
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     /** Waits for the camera to be released; if it isn't in time, dies, which frees it. */
     private static void awaitRelease(CountDownLatch done) {
         boolean ok;
@@ -321,10 +366,7 @@ final class Guard extends Thread {
         } catch (InterruptedException e) {
             ok = false;
         }
-        if (!ok) {
-            Log.e("camera release took over " + RELEASE_TIMEOUT_MS + " ms; exiting to free it", null);
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
+        if (!ok) dieForReverse("camera release took over " + RELEASE_TIMEOUT_MS + " ms");
     }
 
     /** RearCamera.getGearStatus(): asks the Cortex-M (/dev/tcc_cm_ctrl); 1 is reverse. */
