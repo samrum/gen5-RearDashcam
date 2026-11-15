@@ -60,6 +60,11 @@ final class Guard extends Thread {
     /** The ignition reading off this many polls in a row (about a second) means the car is off. */
     private static final int IGNITION_OFF_POLLS = 4;
     /**
+     * The gear unreadable this many polls in a row counts as reverse: without it there's no telling
+     * when the stock view needs the camera (this firmware doesn't deliver CAMERA_APP_START here).
+     */
+    private static final int GEAR_UNKNOWN_POLLS = 3;
+    /**
      * The main thread opens, hands off and releases the camera. If it hasn't run a check-in for
      * this long, the heartbeat stops so the watchdog kills the process; in reverse, much sooner,
      * the process kills itself: a camera call hung there would keep the stock view out.
@@ -122,6 +127,7 @@ final class Guard extends Thread {
     private boolean disabled;
     private long appConfModified, appConfLength;
     private int lastGear = -1;
+    private int gearUnknownPolls;
     private int ignitionOffPolls;
     private Boolean lastIgnition;
     private String lastState;
@@ -154,8 +160,10 @@ final class Guard extends Thread {
         if (disabled) Log.i("recording is turned off in the app");
         // Camera type 6 (360-view cars' digital camera) sends video only while the car shows its own
         // camera view. The installer refuses these cars; this is in case its check couldn't tell.
-        final boolean unsupported = RearCam.type() == UNSUPPORTED_CAMERA_TYPE;
-        if (unsupported) Log.w("camera type " + UNSUPPORTED_CAMERA_TYPE + " isn't supported (360 view cars); not recording");
+        final boolean noGear = gearStatus == null;
+        final boolean unsupported = noGear || RearCam.type() == UNSUPPORTED_CAMERA_TYPE;
+        if (noGear) Log.w("no way to read the gear, so reverse can't be detected; not using the camera");
+        else if (unsupported) Log.w("camera type " + UNSUPPORTED_CAMERA_TYPE + " isn't supported (360 view cars); not recording");
         boolean wasPreview = false;
         long nextStart = 0;
         boolean mounted = true;
@@ -169,13 +177,17 @@ final class Guard extends Thread {
                     Log.i("gear status " + gear);
                     lastGear = gear;
                 }
-                if (gear == GEAR_REVERSE) {
+                // Fail safe: a gear that can't be read might be reverse.
+                gearUnknownPolls = gear < 0 ? gearUnknownPolls + 1 : 0;
+                boolean gearUnknown = gearUnknownPolls >= GEAR_UNKNOWN_POLLS;
+                if (gearUnknownPolls == GEAR_UNKNOWN_POLLS) Log.w("can't read the gear; treating it as reverse until it reads again");
+                if (gear == GEAR_REVERSE || gearUnknown) {
                     mirror.allow(false);
                     lastBlockMs = now;
                     if (mainStalled >= REVERSE_MAIN_STALL_MS) {
                         dieForReverse("the main thread has been stuck for " + mainStalled + " ms in reverse");
                     }
-                    if (recorder.isActive() && !recorder.isPassive()) handOff("reverse");
+                    if (recorder.isActive() && !recorder.isPassive()) handOff(gearUnknown ? "gear unreadable" : "reverse");
                 }
                 if (now < nextStatePoll) {
                     SystemClock.sleep(recorder.isActive() && !recorder.isPassive() ? POLL_MS : STATE_POLL_MS);
