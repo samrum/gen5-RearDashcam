@@ -2,8 +2,9 @@ package dev.skramer.dashcam;
 
 /**
  * Settings: from --key=value arguments (dashcam.conf; the service script passes them), then
- * the player app's settings file, which only the app can write and which only turns recording on
- * and off. The defaults are what's been tested: change them only to experiment.
+ * the player app's settings file, which only the app can write and which turns recording on and
+ * off and sets how much of the drive recordings may use. The defaults are what's been tested:
+ * change them only to experiment.
  */
 final class Config implements Cloneable {
     private static final String APP_FILES = "/data/data/dev.skramer.dashcam.player/files/";
@@ -31,6 +32,13 @@ final class Config implements Cloneable {
     int segmentSeconds = 60;
     /** Oldest segments are deleted to keep at least this share of the drive free. */
     int minFreePercent = 5;
+    /**
+     * The most the recording folder may use, in bytes, saved clips and snapshots included; 0 for
+     * no limit. Oldest segments are deleted to stay under it. The app's setting, when there is
+     * one, replaces --max-gb, and changing it there takes effect at the next segment: Guard
+     * updates this field on the Config the writer shares.
+     */
+    volatile long maxBytes;
     /** Flip the picture left to right: the backup camera sends a mirror image. */
     boolean mirror = true;
     /** Set if recordings come out with red and blue swapped. */
@@ -69,6 +77,7 @@ final class Config implements Cloneable {
                 case "bitrate": c.bitrate = Integer.parseInt(v); break;
                 case "segment": c.segmentSeconds = Integer.parseInt(v); break;
                 case "min-free-percent": c.minFreePercent = Integer.parseInt(v); break;
+                case "max-gb": c.maxBytes = gigabytes(v); break;
                 case "mirror": c.mirror = Boolean.parseBoolean(v); break;
                 case "swap-uv": c.swapUv = Boolean.parseBoolean(v); break;
                 case "hide-guide-lines": c.hideGuideLines = Boolean.parseBoolean(v); break;
@@ -85,6 +94,17 @@ final class Config implements Cloneable {
         return c;
     }
 
+    /** The smallest limit allowed: about 45 minutes at the default bitrate, many times a segment. */
+    static final long MIN_LIMIT_BYTES = 1_000_000_000L;
+
+    /** A size limit in GB (decimals allowed) as bytes; 0 means no limit. */
+    static long gigabytes(String v) {
+        double gb = Double.parseDouble(v.trim());
+        if (gb == 0) return 0;
+        if (!(gb * 1e9 >= MIN_LIMIT_BYTES) || gb > 1e6) throw new IllegalArgumentException("bad size limit: " + v + " GB (0, or at least 1)");
+        return Math.round(gb * 1e9);
+    }
+
     /**
      * Overrides with the app's settings file, if there is one. Out-of-range values are ignored:
      * the file is the app's, but a bad value shouldn't stop the dashcam.
@@ -97,12 +117,27 @@ final class Config implements Cloneable {
         try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f))) {
             // Older apps also saved fps, bitrate, segment and minfree; those are fixed now.
             for (String line; (line = r.readLine()) != null; ) {
-                if (line.trim().startsWith("enabled=")) c.enabled = Boolean.parseBoolean(line.trim().substring(8).trim());
+                line = line.trim();
+                if (line.startsWith("enabled=")) c.enabled = Boolean.parseBoolean(line.substring(8).trim());
+                else if (line.startsWith("maxgb=")) {
+                    try {
+                        c.maxBytes = gigabytes(line.substring(6));
+                    } catch (IllegalArgumentException e) {  // NumberFormatException included
+                        Log.w("ignoring the app's size limit: " + e.getMessage());
+                    }
+                }
             }
         } catch (java.io.IOException e) {
             Log.w("can't read " + appConf + ": " + e);
         }
         return c;
+    }
+
+    /** The size limit for the log and the app: "no limit" or "at most 64 GB". */
+    static String describeLimit(long bytes) {
+        if (bytes <= 0) return "no size limit";
+        double gb = bytes / 1e9;
+        return "at most " + (gb == Math.rint(gb) ? String.valueOf((long) gb) : String.valueOf(Math.round(gb * 10) / 10.0)) + " GB";
     }
 
     /** The recorder's copy of the app's settings. */
@@ -121,7 +156,7 @@ final class Config implements Cloneable {
     @Override
     public String toString() {
         return width + "x" + height + "@" + fps + " " + bitrate / 1000 + " kbit/s, " + segmentSeconds
-                + " s segments in " + outDir + " (keep " + minFreePercent + "% free)" + (mirror ? ", mirrored" : "")
+                + " s segments in " + outDir + " (keep " + minFreePercent + "% free, " + describeLimit(maxBytes) + ")" + (mirror ? ", mirrored" : "")
                 + (swapUv ? ", swap-uv" : "")
                 + (enabled ? "" : ", turned off");
     }

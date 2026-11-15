@@ -97,6 +97,7 @@ final class SegmentWriter extends Thread {
                 }
                 if (f == END) {
                     closeSegment();
+                    storage.remeasure();
                     if (saveRequestedMs != 0) save();
                     continue;
                 }
