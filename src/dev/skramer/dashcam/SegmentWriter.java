@@ -150,9 +150,8 @@ final class SegmentWriter extends Thread {
             java.util.Arrays.sort(segments);
             for (File f : segments) {
                 if (!f.getName().endsWith(".ts") || f.lastModified() < requested - config.saveSeconds * 1000L) continue;
-                File to = new File(saved, f.getName());
-                if ((saved.isDirectory() || saved.mkdirs()) && f.renameTo(to)) {
-                    storage.saved(to);
+                if ((saved.isDirectory() || saved.mkdirs()) && f.renameTo(new File(saved, f.getName()))) {
+                    storage.saved(f.getName());
                     if (first == null) first = f.getName();
                     moved++;
                 } else {

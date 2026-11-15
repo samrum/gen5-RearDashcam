@@ -320,11 +320,10 @@ public final class MainActivity extends Activity {
                 : rec.bitrate / 8.0 * 3600 * 1.02;
     }
 
-    /** Space left for the loop of recordings: the drive less the share kept free, or the limit, less saved clips. */
+    /** Space for the loop of recordings: the drive less the share kept free and saved clips, or the limit if smaller. */
     private long loopBytes(long driveBytes, long maxBytes) {
-        long loop = driveBytes / 100 * (100 - rec.minFreePercent);
-        if (maxBytes > 0) loop = Math.min(loop, maxBytes);
-        return loop - (lib == null ? 0 : lib.savedBytes);
+        long loop = driveBytes / 100 * (100 - rec.minFreePercent) - (lib == null ? 0 : lib.savedBytes);
+        return maxBytes > 0 ? Math.min(loop, maxBytes) : loop;
     }
 
     /** Sizes offered for the limit, in GB. */
@@ -356,11 +355,11 @@ public final class MainActivity extends Activity {
                     : Fmt.size(bytes) + " for recordings";
             if (space != null && lib != null) {
                 long loop = loopBytes(space[0], bytes);
-                labels[i] += loop > 0 ? " · about " + Math.round(loop / bytesPerHour()) + " h" : " · saved clips fill it";
+                if (loop > 0) labels[i] += " · about " + Math.round(loop / bytesPerHour()) + " h";
             }
         }
         new AlertDialog.Builder(this, AlertDialog.THEME_HOLO_DARK)
-                .setTitle("Space for recordings (saved clips count)")
+                .setTitle("Space for regular recordings (saved clips extra)")
                 .setSingleChoiceItems(labels, checked, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {

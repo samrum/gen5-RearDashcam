@@ -27,7 +27,7 @@ final class RecorderLink {
     String out = "/storage/usb0/Dashcam";
     String mount = "/storage/usb0";
     int fps = 20, bitrate = 3_000_000, segment = 60, minFreePercent = 5;
-    /** The most the recording folder may use, saved clips included; 0 for no limit. */
+    /** The most the loop of recordings may use, saved clips not counted; 0 for no limit. */
     long maxBytes;
 
     static RecorderLink read() {

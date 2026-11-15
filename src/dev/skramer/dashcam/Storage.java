@@ -31,14 +31,13 @@ final class Storage {
     // about 10 s of queue. So it's measured on a thread of its own, and kept up to date here.
     /** Segments in the recording folder, name to size: names sort oldest first. Null until measured. */
     private TreeMap<String, Long> loop;
-    /** Bytes of the segments in loop, and of everything else in the folder (Saved, Snapshots). */
-    private long loopBytes, otherBytes;
+    /** Bytes of the segments in loop. */
+    private long loopBytes;
     /** SystemClock.uptimeMillis() of the last measurement's start; and whether one is running. */
     private long measuredAt;
     private boolean measuring;
     /** The segment handed out last, whose size is added once it's finished. */
     private File current;
-    private boolean warnedFull;
 
     Storage(Config config) {
         this.config = config;
@@ -75,8 +74,8 @@ final class Storage {
     }
 
     /**
-     * Deletes the oldest segments until the recording folder is under the size limit with room
-     * for one more segment, and the configured share of the drive is free.
+     * Deletes the oldest segments until they're under the size limit with room for one more, and
+     * the configured share of the drive is free. Saved clips and snapshots don't count.
      */
     void makeRoom() throws IOException {
         ensureDir();
@@ -90,21 +89,19 @@ final class Storage {
         return (long) config.bitrate / 8 * config.segmentSeconds * 11 / 10;
     }
 
-    /** Folder size limit. Until the first measurement finishes, only keepFree applies. */
+    /** Size limit on the loop of segments. Until the first measurement finishes, only keepFree applies. */
     private synchronized void keepUnder(long max) {
         if (!measuring && (loop == null || SystemClock.uptimeMillis() - measuredAt >= RESCAN_MS)) measure();
         if (loop == null) return;
         if (current != null) {
-            // The segment just finished (unless the save button moved it to Saved: then the next
-            // measurement counts it there).
+            // The segment just finished, unless the save button moved it to Saved.
             if (current.isFile()) add(current.getName(), current.length());
             current = null;
         }
-        long reserve = nextSegmentBytes(), used = loopBytes + otherBytes;
-        while (used + reserve > max && !loop.isEmpty()) {
+        long reserve = nextSegmentBytes();
+        while (loopBytes + reserve > max && !loop.isEmpty()) {
             Map.Entry<String, Long> oldest = loop.pollFirstEntry();
             loopBytes -= oldest.getValue();
-            used -= oldest.getValue();
             File f = new File(dir, oldest.getKey());
             if (!f.exists()) continue;  // deleted in the app, or saved
             if (f.delete()) {
@@ -113,13 +110,6 @@ final class Storage {
                 Log.w("can't delete " + f);
                 return;
             }
-        }
-        if (used + reserve > max) {
-            if (!warnedFull) Log.w("saved clips and snapshots use " + otherBytes / 1_000_000 + " MB of the "
-                    + Config.describeLimit(max) + " limit; recording anyway");
-            warnedFull = true;
-        } else {
-            warnedFull = false;
         }
     }
 
@@ -144,14 +134,12 @@ final class Storage {
             @Override
             public void run() {
                 TreeMap<String, Long> segments = new TreeMap<>();
-                long other = 0;
                 long started = SystemClock.uptimeMillis();
                 try {
                     File[] files = dir.listFiles();
                     if (files != null) {
                         for (File f : files) {
-                            if (f.isFile() && f.getName().endsWith(".ts")) segments.put(f.getName(), f.length());
-                            else other += size(f, 0);
+                            if (f.getName().endsWith(".ts") && f.isFile()) segments.put(f.getName(), f.length());
                         }
                     }
                 } catch (RuntimeException e) {  // the drive went away
@@ -170,23 +158,13 @@ final class Storage {
                     loop = segments;
                     loopBytes = 0;
                     for (long b : loop.values()) loopBytes += b;
-                    otherBytes = other;
-                    Log.i("recording folder: " + loopBytes / 1_000_000 + " MB of recordings, " + other / 1_000_000
-                            + " MB saved (" + loop.size() + " files, measured in " + took + " ms)");
+                    Log.i("recording folder: " + loopBytes / 1_000_000 + " MB in " + loop.size()
+                            + " segments (measured in " + took + " ms)");
                 }
             }
         };
         t.setDaemon(true);
         t.start();
-    }
-
-    /** Bytes in a file or folder, a few levels deep. */
-    private static long size(File f, int depth) {
-        if (f.isFile()) return f.length();
-        File[] in = depth < 4 ? f.listFiles() : null;
-        long total = 0;
-        if (in != null) for (File g : in) total += size(g, depth + 1);
-        return total;
     }
 
     /** Deletes the oldest segments until the configured share of the drive is free. */
@@ -206,10 +184,9 @@ final class Storage {
             }
             Arrays.sort(segments);
             File oldest = segments[0];
-            long bytes = oldest.length();
             if (oldest.delete()) {
                 Log.i("deleted " + oldest.getName() + " to make room");
-                forget(oldest.getName(), bytes);
+                forget(oldest.getName());
             }
             else {
                 Log.w("can't delete " + oldest);
@@ -219,23 +196,15 @@ final class Storage {
         }
     }
 
-    /**
-     * Keeps the size limit's count right when the save button moves a segment into Saved: its
-     * bytes still count, now as saved ones, and the oldest-first deletion no longer sees it.
-     */
-    synchronized void saved(File moved) {
-        String name = moved.getName();
-        long bytes = moved.length();
-        if (current != null && current.getName().equals(name)) current = null;  // never counted yet
-        else if (loop != null) {
-            Long was = loop.remove(name);
-            if (was != null) loopBytes -= was;
-        }
-        if (loop != null) otherBytes += bytes;
+    /** Takes a segment the save button moved into Saved out of the size limit's count. */
+    synchronized void saved(String name) {
+        if (current != null && current.getName().equals(name)) current = null;
+        else forget(name);
     }
 
     /** Keeps the size limit's count right when keepFree deletes a segment. */
-    private synchronized void forget(String name, long bytes) {
-        if (loop != null && loop.remove(name) != null) loopBytes -= bytes;
+    private synchronized void forget(String name) {
+        Long was = loop == null ? null : loop.remove(name);
+        if (was != null) loopBytes -= was;
     }
 }

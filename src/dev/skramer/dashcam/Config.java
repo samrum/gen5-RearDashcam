@@ -33,8 +33,8 @@ final class Config implements Cloneable {
     /** Oldest segments are deleted to keep at least this share of the drive free. */
     int minFreePercent = 5;
     /**
-     * The most the recording folder may use, in bytes, saved clips and snapshots included; 0 for
-     * no limit. Oldest segments are deleted to stay under it. The app's setting, when there is
+     * The most the loop of segments may use, in bytes; 0 for no limit. Oldest segments are
+     * deleted to stay under it. Saved clips and snapshots come on top. The app's setting, when there is
      * one, replaces --max-gb, and changing it there takes effect at the next segment: Guard
      * updates this field on the Config the writer shares.
      */
