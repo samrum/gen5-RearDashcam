@@ -10,4 +10,5 @@ public interface Os {
     long mmap(long address, long byteCount, int prot, int flags, FileDescriptor fd, long offset) throws Exception;
     void munmap(long address, long byteCount) throws Exception;
     int ioctlInt(FileDescriptor fd, int cmd, MutableInt arg) throws Exception;
+    StructStat lstat(String path) throws Exception;
 }

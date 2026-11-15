@@ -386,7 +386,7 @@ final class Guard extends Thread {
         try {
             return Class.forName("android.hardware.RearCamera").getMethod("getGearStatus");
         } catch (Throwable t) {
-            Log.e("no RearCamera.getGearStatus(); relying on the stock camera broadcast alone", t);
+            Log.e("no RearCamera.getGearStatus(); reverse can't be detected", t);
             return null;
         }
     }
@@ -404,8 +404,10 @@ final class Guard extends Thread {
     private boolean stockCameraOpen() {
         IBinder service = ServiceManager.getService("media.rearcamera");
         if (service == null) return false;
-        File dump = new File(config.stateDir, "rearcamera.txt");
+        File dump = null;
         try {
+            // A new file each time: a fixed name in the shared state directory could be a planted link.
+            dump = File.createTempFile(".rearcamera-", ".txt", new File(config.stateDir));
             try (FileOutputStream out = new FileOutputStream(dump)) {
                 service.dump(out.getFD(), new String[0]);
             }
@@ -417,6 +419,8 @@ final class Guard extends Thread {
         } catch (Throwable t) {
             Log.e("can't check the rear camera service", t);
             return false;
+        } finally {
+            if (dump != null) dump.delete();
         }
     }
 
@@ -438,15 +442,14 @@ final class Guard extends Thread {
     /** Copies the app's settings file to the state directory, so they outlive a reinstall of the app. */
     private void saveSettingsCopy() {
         if (!appConf.isFile()) return;
-        File copy = config.savedSettings(), tmp = new File(config.stateDir, "settings.tmp");
-        try (FileInputStream in = new FileInputStream(appConf); FileOutputStream out = new FileOutputStream(tmp)) {
+        java.io.ByteArrayOutputStream copy = new java.io.ByteArrayOutputStream();
+        try (FileInputStream in = new FileInputStream(appConf)) {
             byte[] b = new byte[4096];
-            for (int n; (n = in.read(b)) > 0; ) out.write(b, 0, n);
+            for (int n; (n = in.read(b)) > 0 && copy.size() < 64 * 1024; ) copy.write(b, 0, n);
+            StateFile.write(config.savedSettings(), copy.toByteArray(), false);
         } catch (IOException e) {
             Log.e("can't keep a copy of the app's settings", e);
-            return;
         }
-        if (!tmp.renameTo(copy)) Log.w("can't replace " + copy);
     }
 
     /**
@@ -458,20 +461,14 @@ final class Guard extends Thread {
     private void writeStatus(String state) {
         String key = state + " " + driveMounted + " " + disabled;
         if (key.equals(lastState)) return;
-        File tmp = new File(config.stateDir, "status.tmp");
         String text = "state=" + state + "\nenabled=" + !disabled + "\nsince=" + System.currentTimeMillis() + "\nout=" + config.outDir
                 + "\nmount=" + config.mount + "\nfps=" + config.fps + "\nbitrate=" + config.bitrate
                 + "\nsegment=" + config.segmentSeconds + "\nminfree=" + config.minFreePercent
                 + "\ndrive=" + driveMounted + "\n";
-        try (FileOutputStream out = new FileOutputStream(tmp)) {
-            out.write(text.getBytes(StandardCharsets.US_ASCII));
+        try {
+            StateFile.write(status, text.getBytes(StandardCharsets.US_ASCII), true);
         } catch (IOException e) {
-            Log.e("can't write " + tmp, e);
-            return;
-        }
-        tmp.setReadable(true, false);
-        if (!tmp.renameTo(status)) {
-            Log.w("can't replace " + status);
+            Log.e("can't write " + status, e);
             return;
         }
         lastState = key;
@@ -479,10 +476,9 @@ final class Guard extends Thread {
 
     /** "pid count": the watchdog service kills the process if the count stops changing. */
     private void writeHeartbeat(long count) {
-        try (FileOutputStream out = new FileOutputStream(heartbeat)) {
-            out.write((android.os.Process.myPid() + " " + count + "\n").getBytes(StandardCharsets.US_ASCII));
-            // The watchdog runs as NEMESIS root, which can't read past file permissions.
-            if (count == 0) heartbeat.setReadable(true, false);
+        try {
+            // Readable: the watchdog runs as NEMESIS root, which can't read past file permissions.
+            StateFile.write(heartbeat, (android.os.Process.myPid() + " " + count + "\n").getBytes(StandardCharsets.US_ASCII), true);
         } catch (IOException e) {
             if (count % 60 == 0) Log.e("can't write " + heartbeat, e);
         }
