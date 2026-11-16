@@ -30,6 +30,16 @@ public final class Log {
     public static int e(String tag, String msg, Throwable t) { return 0; }
 }
 JAVA
+# Config checks the app's settings file with StateFile once that exists (it needs libcore): a stand-in.
+cat > "$work/src/StateFile.java" <<'JAVA'
+package dev.skramer.dashcam;
+final class StateFile {
+    static boolean ours(java.io.File f) { return f.isFile(); }
+    static void write(java.io.File f, byte[] data, boolean readable) throws java.io.IOException {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) { out.write(data); }
+    }
+}
+JAVA
 cat > "$work/src/StorageLimitTest.java" <<'JAVA'
 package dev.skramer.dashcam;
 import java.io.File;
@@ -146,7 +156,7 @@ public final class StorageLimitTest {
 JAVA
 d="$repo/src/dev/skramer/dashcam"
 javac -nowarn -d "$work/classes" "$work/src/android/os/"*.java "$work/src/android/util/"*.java \
-    "$d/Storage.java" "$d/Config.java" "$d/Log.java" "$work/src/StorageLimitTest.java"
+    "$d/Storage.java" "$d/Config.java" "$d/Log.java" "$work/src/StateFile.java" "$work/src/StorageLimitTest.java"
 mkdir "$work/drive"
 java -cp "$work/classes" dev.skramer.dashcam.StorageLimitTest "$work/drive" > "$work/out.txt" || { cat "$work/out.txt"; exit 1; }
 tail -1 "$work/out.txt"
