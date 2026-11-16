@@ -1,13 +1,14 @@
 #!/bin/bash
 # Build the Gen5W dashcam NEMESIS package: the recorder service and the player app.
 #
-# usage: ./build.sh <version>        e.g. ./build.sh 0.1
+# usage: ./build.sh [--no-mirror] <version>        e.g. ./build.sh 0.1
+#   --no-mirror   leave Digital Rearview Mirror out of the package (and dist/)
 #
 # Outputs in dist/:
 #   dashcam-<version>.zip       NEMESIS package (nemesis install --update over ADB)
 #   dashcam-<version>-usb.zip   the same, wrapped for USB install: extract onto a drive's root
 #   DashcamPlayer.apk           the player app on its own
-#   DigitalRearviewMirror.apk  live camera viewer; requires this recorder version
+#   DigitalRearviewMirror.apk  live camera viewer; requires this recorder version (not with --no-mirror)
 #   SHA256SUMS
 #
 # Needs: Java 17+ and the Android SDK ($ANDROID_HOME, default ~/Android/Sdk) with a platform,
@@ -21,7 +22,9 @@ set -euo pipefail
 
 SIGNING_CERT_SHA256=668a8439a1526d82bbb02fb26e831711345f98d72f47923c22503207568d4b4a
 
-VERSION=${1:?usage: build.sh <version>}
+MIRROR=1
+if [ "${1:-}" = --no-mirror ]; then MIRROR=0; shift; fi
+VERSION=${1:?usage: build.sh [--no-mirror] <version>}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ANDROID_HOME=${ANDROID_HOME:-$HOME/Android/Sdk}
 ANDROID_JAR=$(ls -d "$ANDROID_HOME"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)
@@ -59,7 +62,8 @@ javac -source 8 -target 8 -Xlint:-options -bootclasspath "$ANDROID_JAR" -cp "$wo
     -o "$work/dashcam-overlay" "$HERE/native/overlay.c"
 
 # Player app
-(cd "$HERE/player" && ANDROID_HOME=$ANDROID_HOME ./gradlew -q assembleRelease -PdashcamVersion="$VERSION")
+if [ "$MIRROR" = 1 ]; then tasks=(assembleRelease); else tasks=(:app:assembleRelease); fi
+(cd "$HERE/player" && ANDROID_HOME=$ANDROID_HOME ./gradlew -q "${tasks[@]}" -PdashcamVersion="$VERSION")
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-key-alias dashcam --ks-pass "$KS_PASS" --min-sdk-version 19 \
     --out "$work/DashcamPlayer.apk" "$HERE/player/app/build/outputs/apk/release/app-release-unsigned.apk"
 rm -f "$work/DashcamPlayer.apk.idsig"
@@ -68,6 +72,7 @@ certs=$("$BT/apksigner" verify --min-sdk-version 19 --print-certs "$work/Dashcam
 grep -qi "certificate SHA-256 digest: $SIGNING_CERT_SHA256\$" <<< "$certs" \
     || die "player signed with the wrong key (expected certificate SHA-256 $SIGNING_CERT_SHA256)"
 
+if [ "$MIRROR" = 1 ]; then
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-key-alias dashcam --ks-pass "$KS_PASS" --min-sdk-version 19 \
     --out "$work/DigitalRearviewMirror.apk" "$HERE/player/mirror/build/outputs/apk/release/mirror-release-unsigned.apk"
 rm -f "$work/DigitalRearviewMirror.apk.idsig"
@@ -75,6 +80,7 @@ certs=$("$BT/apksigner" verify --min-sdk-version 19 --print-certs "$work/Digital
     || die "mirror signature doesn't verify for API 19"
 grep -qi "certificate SHA-256 digest: $SIGNING_CERT_SHA256\$" <<< "$certs" \
     || die "mirror signed with the wrong key"
+fi
 
 stage=$work/package
 cp -R "$HERE/package" "$stage"
@@ -83,14 +89,20 @@ cp "$work/libdashcam.so" "$stage/libdashcam.so"
 cp "$work/dashcam-overlay" "$stage/dashcam-overlay"
 mkdir -p "$stage/app"
 cp "$work/DashcamPlayer.apk" "$stage/app/DashcamPlayer.apk"
-cp "$work/DigitalRearviewMirror.apk" "$stage/app/DigitalRearviewMirror.apk"
+[ "$MIRROR" = 1 ] && cp "$work/DigitalRearviewMirror.apk" "$stage/app/DigitalRearviewMirror.apk"
 cp "$HERE/LICENSE" "$stage/LICENSE"
-python3 -I - "$stage/NEMESIS.data" "$VERSION" <<'EOF'
-import sys
-p, v = sys.argv[1], sys.argv[2]
+python3 -I - "$stage/NEMESIS.data" "$VERSION" "$MIRROR" <<'EOF'
+import re, sys
+p, v, mirror = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 s = open(p).read()
 assert "@VERSION@" in s
-open(p, "w").write(s.replace("@VERSION@", v))
+s = s.replace("@VERSION@", v)
+if not mirror:
+    # Drop the mirror's [app.N] section. The Mode filter's scripts stay: they remove a rule an
+    # earlier package may have left.
+    s, n = re.subn(r"\[app\.\d+\]\n(?:(?!\[)[^\n]*\n)*?package=dev\.skramer\.dashcam\.mirror\n(?:(?!\[)[^\n]*\n)*", "", s)
+    assert n == 1, "no mirror section in NEMESIS.data"
+open(p, "w").write(s)
 EOF
 
 mkdir -p "$DIST"
@@ -109,8 +121,13 @@ with zipfile.ZipFile(usb, "w", zipfile.ZIP_DEFLATED) as z:
 EOF
 cp "$work/dashcam.jar" "$DIST/dashcam.jar"
 cp "$work/DashcamPlayer.apk" "$DIST/DashcamPlayer.apk"
-cp "$work/DigitalRearviewMirror.apk" "$DIST/DigitalRearviewMirror.apk"
-(cd "$DIST" && sha256sum -- "dashcam-$VERSION.zip" "dashcam-$VERSION-usb.zip" \
-    DashcamPlayer.apk DigitalRearviewMirror.apk > SHA256SUMS)
+sums=("dashcam-$VERSION.zip" "dashcam-$VERSION-usb.zip" DashcamPlayer.apk)
+if [ "$MIRROR" = 1 ]; then
+    cp "$work/DigitalRearviewMirror.apk" "$DIST/DigitalRearviewMirror.apk"
+    sums+=(DigitalRearviewMirror.apk)
+else
+    rm -f "$DIST/DigitalRearviewMirror.apk"  # a stale one from an earlier build
+fi
+(cd "$DIST" && sha256sum -- "${sums[@]}" > SHA256SUMS)
 echo "built:"
 ls -l "$DIST" | tail -n +2
