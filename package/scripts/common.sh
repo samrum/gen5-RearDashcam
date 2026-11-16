@@ -50,9 +50,16 @@ restore_mirror_key() {
     _mode_disabled=1
 }
 
+# The long-Mode trigger is opt-in (--mirror-mode-key=true in dashcam.conf). Checked here as well as
+# in the recorder, so a stale heartbeat can never put the filter back while the setting is off.
+mirror_key_wanted() {
+    case " $DASHCAM_ARGS " in *" --mirror-mode-key=true "*) return 0 ;; esac
+    return 1
+}
+
 sync_mirror_key() {
     _mode_ready=$(cat "$STATE/mirror-key-ready" 2>/dev/null)
-    if [ -n "$_mode_ready" ] && [ "$_mode_ready" != "${_mode_last:-}" ] && recorder_pid > /dev/null; then
+    if [ -n "$_mode_ready" ] && mirror_key_wanted && [ "$_mode_ready" != "${_mode_last:-}" ] && recorder_pid > /dev/null; then
         _mode_disabled=0
         if [ ! -f "$STATE/mirror-key-filtered" ]; then
             "$NEMESIS" root $SYSTEM_UID -c "sh $HERE/scripts/mirror-filter.sh enable" ||
