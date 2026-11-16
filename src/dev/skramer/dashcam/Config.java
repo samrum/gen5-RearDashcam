@@ -118,8 +118,11 @@ final class Config implements Cloneable {
     Config withAppSettings() {
         Config c = copy();
         java.io.File f = new java.io.File(appConf);
-        if (!f.isFile()) f = savedSettings();
-        if (!f.isFile()) return c;
+        if (!f.isFile()) {
+            // The copy is in the shared state directory: only trust one this uid wrote.
+            f = savedSettings();
+            if (!StateFile.ours(f)) return c;
+        }
         try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f))) {
             // Older apps also saved fps, bitrate, segment and minfree; those are fixed now.
             for (String line; (line = r.readLine()) != null; ) {
