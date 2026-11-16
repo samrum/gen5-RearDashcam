@@ -97,6 +97,7 @@ final class SegmentWriter extends Thread {
                 }
                 if (f == END) {
                     closeSegment();
+                    storage.remeasure();
                     if (saveRequestedMs != 0) save();
                     continue;
                 }
@@ -150,6 +151,7 @@ final class SegmentWriter extends Thread {
             for (File f : segments) {
                 if (!f.getName().endsWith(".ts") || f.lastModified() < requested - config.saveSeconds * 1000L) continue;
                 if ((saved.isDirectory() || saved.mkdirs()) && f.renameTo(new File(saved, f.getName()))) {
+                    storage.saved(f.getName());
                     if (first == null) first = f.getName();
                     moved++;
                 } else {

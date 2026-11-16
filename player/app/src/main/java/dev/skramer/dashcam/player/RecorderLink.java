@@ -27,6 +27,8 @@ final class RecorderLink {
     String out = "/storage/usb0/Dashcam";
     String mount = "/storage/usb0";
     int fps = 20, bitrate = 3_000_000, segment = 60, minFreePercent = 5;
+    /** The most the loop of recordings may use, saved clips not counted; 0 for no limit. */
+    long maxBytes;
 
     static RecorderLink read() {
         RecorderLink r = new RecorderLink();
@@ -48,6 +50,7 @@ final class RecorderLink {
                         case "bitrate": r.bitrate = Integer.parseInt(v); break;
                         case "segment": r.segment = Integer.parseInt(v); break;
                         case "minfree": r.minFreePercent = Integer.parseInt(v); break;
+                        case "maxbytes": r.maxBytes = Long.parseLong(v); break;
                         default: break;
                     }
                 } catch (NumberFormatException ignored) {
@@ -75,9 +78,17 @@ final class RecorderLink {
         return configuredEnabled != null ? configuredEnabled : !"off".equals(state);
     }
 
-    /** What the app asks of the recorder: recording on or off. Everything else is fixed. */
+    /**
+     * What the app asks of the recorder: recording on or off, and how much of the drive it may
+     * use. Everything else is fixed.
+     */
     static final class Settings {
         boolean enabled = true;
+        /**
+         * Size limit in GB, 0 for none; null leaves it to the recorder (its --max-gb, or none).
+         * The recorder ignores values between 0 and 1.
+         */
+        Double maxGb;
 
         /**
          * The saved setting; without a file (first run, or after a package update reinstalled
@@ -89,11 +100,19 @@ final class RecorderLink {
             if (!f.isFile()) {
                 RecorderLink r = RecorderLink.read();
                 if (r.state != null) s.enabled = r.enabled();
+                if (r.maxBytes > 0) s.maxGb = r.maxBytes / 1e9;  // the recorder's copy kept it
                 return s;
             }
             try (BufferedReader in = new BufferedReader(new FileReader(f))) {
                 for (String line; (line = in.readLine()) != null; ) {
                     if (line.startsWith("enabled=")) s.enabled = Boolean.parseBoolean(line.substring(8).trim());
+                    else if (line.startsWith("maxgb=")) {
+                        try {
+                            s.maxGb = Double.parseDouble(line.substring(6).trim());
+                        } catch (NumberFormatException ignored) {
+                            // leave it to the recorder
+                        }
+                    }
                 }
             } catch (IOException e) {
                 // nothing saved yet
@@ -104,6 +123,7 @@ final class RecorderLink {
         /** Saves for the recorder, which picks it up within a second. */
         void write(Context c) throws IOException {
             StringBuilder b = new StringBuilder("enabled=").append(enabled).append('\n');
+            if (maxGb != null) b.append("maxgb=").append(gb(maxGb)).append('\n');
             File dir = c.getFilesDir();
             File tmp = new File(dir, CONF + ".tmp");
             try (FileOutputStream out = new FileOutputStream(tmp)) {
@@ -118,5 +138,10 @@ final class RecorderLink {
     private static void readableByRecorder(File dir, File f) {
         dir.setExecutable(true, false);
         f.setReadable(true, false);
+    }
+
+    /** "64" or "0.5": the recorder reads either. */
+    static String gb(double gb) {
+        return gb == Math.rint(gb) ? String.valueOf((long) gb) : String.valueOf(gb);
     }
 }

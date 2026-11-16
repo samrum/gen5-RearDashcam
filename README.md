@@ -14,7 +14,7 @@ Turns your backup camera into a dashcam for the Hyundai IONIQ 5 with the Gen5W h
 
 - **Always recording while the car is on.** Nothing to open or turn on. It stops when the car is off.
 - **A red dot in the status bar** (next to the Bluetooth and signal icons) whenever it's recording to the drive. No dot means nothing is being saved.
-- **Never fills up.** When the drive is full, the oldest recordings are deleted to make room.
+- **Never fills up.** When the drive is full, the oldest recordings are deleted to make room. To share the drive with music or other files, tap the drive space at the top of the app and pick how much recordings may use (saved clips come on top).
 - **Your backup camera still works.** When you reverse or press the camera button, the dashcam hands the camera over and keeps recording what the backup view shows, guide lines and all, then takes the camera back a few seconds after.
 - **Save from the steering wheel.** Press the mute button four times quickly to keep the last two minutes.
 - **Watch on the screen** (in Park): browse by day and hour, skip around, step frame by frame, zoom in on a license plate, take a snapshot.
@@ -45,7 +45,7 @@ After installing or updating version 0.15 or newer, reboot the head unit so the 
 
 The package also includes **Digital Rearview Mirror**, a separate app showing only the live rear camera. Hold the left steering-wheel **Mode** button to open it; a normal short press still changes media sources. Hold **Mode** again, tap anywhere, or press Back to close it. Its bottom-right corner shows a blinking red dot and "Recording to USB" while the dashcam is recording, or "Recording Disabled" or "No Flash Drive" when it isn't. The bottom-left corner reminds you the camera has a wide-angle lens: objects closer than they appear. It uses the recorder's camera session, including a preview-only session when there is no USB drive, and yields to the stock parking camera. It does not offer recording playback; the Dashcam player's parked-only restriction remains in place. Installing the mirror APK alone requires the matching recorder package to supply its video and Mode trigger.
 
-To update, install the new version the same way. Your recordings, saved clips and the on/off setting are kept.
+To update, install the new version the same way. Your recordings, saved clips, the on/off setting and the space limit are kept.
 
 ## Finding your recordings
 
