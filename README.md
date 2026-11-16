@@ -13,7 +13,7 @@ Turns your backup camera into a dashcam for the Hyundai IONIQ 5 with the Gen5W h
 ## What you get
 
 - **Always recording while the car is on.** Nothing to open or turn on. It stops when the car is off.
-- **A red dot in the status bar** (next to the Bluetooth and signal icons) whenever it's recording to the drive. No dot means nothing is being saved.
+- **An optional red dot in the status bar** (next to the Bluetooth and signal icons) whenever it's recording to the drive. It's off by default; add `--status-icon=true` to `DASHCAM_ARGS` in dashcam.conf to turn it on.
 - **Never fills up.** When the drive is full, the oldest recordings are deleted to make room.
 - **Your backup camera still works.** When you reverse or press the camera button, the dashcam hands the camera over and keeps recording what the backup view shows, guide lines and all, then takes the camera back a few seconds after.
 - **Save from the steering wheel.** Press the mute button four times quickly to keep the last two minutes.

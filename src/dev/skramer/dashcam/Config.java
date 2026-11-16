@@ -44,6 +44,11 @@ final class Config implements Cloneable {
      */
     String saveButton = "auto:37";
     int saveSeconds = 120;
+    /**
+     * Show a red dot among the status bar's icons while recording (StatusIcon). Off by default;
+     * off, the recorder also takes down a dot an earlier version left.
+     */
+    boolean statusIcon = false;
     /** Recording turned on in the app. */
     boolean enabled = true;
     /**
@@ -74,6 +79,7 @@ final class Config implements Cloneable {
                 case "hide-guide-lines": c.hideGuideLines = Boolean.parseBoolean(v); break;
                 case "save-button": c.saveButton = v; break;
                 case "save-seconds": c.saveSeconds = Integer.parseInt(v); break;
+                case "status-icon": c.statusIcon = Boolean.parseBoolean(v); break;
                 case "app-conf": c.appConf = v; break;
                 default: throw new IllegalArgumentException("unknown setting: " + k);
             }

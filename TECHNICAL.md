@@ -305,7 +305,8 @@ flash briefly before it's cancelled.
 
 ## Recording dot
 
-A red dot shows among the status bar's icons while frames are going into
+Off by default; `--status-icon=true` in dashcam.conf turns it on. When on, a
+red dot shows among the status bar's icons while frames are going into
 segment files (the last one within 3 s), in the camera's own session or the
 reverse view's; not for a mirror-only preview. Hyundai's SystemUI shows icons
 set through the standard `IStatusBarService.setIcon`, but only in the slots of
@@ -318,7 +319,8 @@ Quiet Mode and the Bluetooth remote. The image is the player app's
 icons 34 dp wide at hdpi), which SystemUI loads from that package. The
 recorder looks up its resource id from the installed APK. The status bar
 service keeps an icon after the process that set it dies, so the recorder's
-first call always hides it, taking down a dot left by a recorder that died.
+first call always hides it, taking down a dot left by a recorder that died
+(or by an earlier version that showed it, with the setting off).
 
 ## The main screen
 

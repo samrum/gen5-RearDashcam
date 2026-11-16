@@ -55,7 +55,7 @@ final class Guard extends Thread {
     private static final long STORAGE_NOTICE_MS = 60000;
     private static final int UNSUPPORTED_CAMERA_TYPE = 6;
     private static final long RETRY_MS = 5000;
-    /** The status-bar dot shows while a frame has gone into a segment file within this long. */
+    /** With --status-icon, the status-bar dot shows while a frame has gone into a segment file within this long. */
     private static final long WRITING_MS = 3000;
     /** The ignition reading off this many polls in a row (about a second) means the car is off. */
     private static final int IGNITION_OFF_POLLS = 4;
@@ -233,7 +233,7 @@ final class Guard extends Thread {
                 }
                 writeStatus(state);
                 boolean writing = recorder.isActive() && !recorder.isPreview() && now - recorder.lastWriteMs() < WRITING_MS;
-                statusIcon.show(writing);
+                statusIcon.show(config.statusIcon && writing);
                 mirror.recording(writing ? MirrorFeed.RECORDING : disabled ? MirrorFeed.DISABLED
                         : !driveMounted ? MirrorFeed.NO_DRIVE : MirrorFeed.OTHER);
                 mirror.allow(!carOff && !blocked && !unsupported && recorder.isActive() && !recorder.isPassive());
