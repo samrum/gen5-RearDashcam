@@ -85,6 +85,12 @@ final class Guard extends Thread {
             recorder.startPreview();
         }
     };
+    private final Runnable startInReverse = new Runnable() {
+        @Override
+        public void run() {
+            recorder.startInReverse();
+        }
+    };
     private final Runnable startEncoding = new Runnable() {
         @Override
         public void run() {
@@ -216,6 +222,11 @@ final class Guard extends Thread {
                     state = offState;
                 } else if (blocked) {
                     state = "reverse";
+                    // Came up while the stock view has the camera: record its frames meanwhile.
+                    if (canRecord && now >= nextStart) {
+                        nextStart = now + RETRY_MS;
+                        main.post(startInReverse);
+                    }
                 } else {
                     if (now >= nextStart) {
                         nextStart = now + RETRY_MS;

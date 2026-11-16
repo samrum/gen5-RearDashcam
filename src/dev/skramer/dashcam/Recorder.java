@@ -168,15 +168,24 @@ final class Recorder {
 
     /** Starts recording, from the camera the stock view would open. */
     void start() {
-        start(false);
+        start(false, false);
     }
 
     /** Starts a preview session: the camera and the feed, for the mirror, not recorded. */
     void startPreview() {
-        start(true);
+        start(true, false);
     }
 
-    private void start(boolean preview) {
+    /**
+     * Starts recording while the stock reverse view has the camera (the recorder came up in
+     * reverse, for instance restarted after a slow release): records the reverse view's frames,
+     * as after a hand-off, without touching the camera. takeBack opens it once reverse is over.
+     */
+    void startInReverse() {
+        start(false, true);
+    }
+
+    private void start(boolean preview, boolean inReverse) {
         if (active) return;
         this.preview = preview;
         cameraId = RearCam.stockId();
@@ -191,7 +200,8 @@ final class Recorder {
             if (ram == null) ram = CameraRam.map();
             if (!ram.fits(width, height)) throw new IllegalStateException(CameraRam.SLOTS + " " + size + " frames don't fit");
             if (!preview) startEncoder();
-            Log.i((preview ? "preview: " : "") + "camera " + cameraId + " at " + size + ", camera type " + RearCam.type());
+            Log.i((preview ? "preview: " : inReverse ? "starting in reverse: " : "") + "camera " + cameraId
+                    + " at " + size + ", camera type " + RearCam.type());
             startNs = System.nanoTime();
             lastPtsUs = -1;
             statsStartMs = SystemClock.uptimeMillis();
@@ -199,6 +209,17 @@ final class Recorder {
             encoded = 0;
             endedCopies = endedCopyNs = copiesAtStats = copyNsAtStats = 0;
             perf.sample();
+            if (inReverse) {
+                passiveSinceMs = SystemClock.uptimeMillis();
+                passiveFirstFrameMs = 0;
+                passiveEncoded = 0;
+                passiveSize = null;
+                passive = true;
+                active = true;
+                Log.i("recording the reverse view: looking for its frames");
+                findStockFrames();
+                return;
+            }
             openCamera();
             active = true;
             feed.start();
