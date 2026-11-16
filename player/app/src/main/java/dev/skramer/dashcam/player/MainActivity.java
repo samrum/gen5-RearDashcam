@@ -134,6 +134,12 @@ public final class MainActivity extends Activity {
                 play(0);
             }
         });
+        driveText.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                chooseLimit();
+            }
+        });
         findViewById(R.id.coffeeButton).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (coffeeDialog == null || !coffeeDialog.isShowing()) coffeeDialog = CoffeeDialog.show(MainActivity.this);
@@ -297,16 +303,84 @@ public final class MainActivity extends Activity {
             driveText.setText("No Drive Detected");
         } else {
             String s = Fmt.size(space[1]) + " free of " + Fmt.size(space[0]);
+            if (rec.maxBytes > 0) s += " · " + Fmt.size(rec.maxBytes) + " limit";
             if (lib != null) {
-                long recorded = lib.recordedMs(Long.MIN_VALUE / 2, Long.MAX_VALUE / 2);
-                double bytesPerHour = recorded > 30 * 60_000L
-                        ? lib.footageBytes * 3_600_000.0 / recorded
-                        : rec.bitrate / 8.0 * 3600 * 1.02;
-                long loop = space[0] / 100 * (100 - rec.minFreePercent) - lib.savedBytes;
-                if (loop > 0) s += " · keeps about " + Math.round(loop / bytesPerHour) + " h";
+                long loop = loopBytes(space[0], rec.maxBytes);
+                if (loop > 0) s += " · keeps about " + Math.round(loop / bytesPerHour()) + " h";
             }
             driveText.setText(s);
         }
+    }
+
+    /** Footage bytes an hour: measured from what's on the drive, or from the bitrate. */
+    private double bytesPerHour() {
+        long recorded = lib == null ? 0 : lib.recordedMs(Long.MIN_VALUE / 2, Long.MAX_VALUE / 2);
+        return recorded > 30 * 60_000L
+                ? lib.footageBytes * 3_600_000.0 / recorded
+                : rec.bitrate / 8.0 * 3600 * 1.02;
+    }
+
+    /** Space for the loop of recordings: the drive less the share kept free and saved clips, or the limit if smaller. */
+    private long loopBytes(long driveBytes, long maxBytes) {
+        long loop = driveBytes / 100 * (100 - rec.minFreePercent) - (lib == null ? 0 : lib.savedBytes);
+        return maxBytes > 0 ? Math.min(loop, maxBytes) : loop;
+    }
+
+    /** Sizes offered for the limit, in GB. */
+    private static final int[] LIMITS_GB = {4, 8, 16, 32, 64, 128, 256, 512, 1000, 2000};
+
+    /** Asks how much of the drive recordings may use, and saves it for the recorder. */
+    private void chooseLimit() {
+        final long[] space = space(rec);
+        final RecorderLink.Settings settings = RecorderLink.Settings.read(this);
+        double current = settings.maxGb != null ? settings.maxGb : rec.maxBytes / 1e9;
+        final List<Double> values = new ArrayList<>();
+        values.add(0.0);
+        for (int gb : LIMITS_GB) {
+            if (space != null && gb * 1e9 >= space[0]) break;  // no limit at all, then
+            values.add((double) gb);
+        }
+        if (current >= 1 && !values.contains(current)) {  // set by hand in dashcam.conf
+            int i = 1;
+            while (i < values.size() && values.get(i) < current) i++;
+            values.add(i, current);
+        }
+        String[] labels = new String[values.size()];
+        int checked = 0;
+        for (int i = 0; i < labels.length; i++) {
+            double gb = values.get(i);
+            long bytes = Math.round(gb * 1e9);
+            if (gb == current || (gb == 0 && current < 1)) checked = i;
+            labels[i] = gb == 0 ? "No limit: use the drive, keeping " + rec.minFreePercent + "% free"
+                    : Fmt.size(bytes) + " for recordings";
+            if (space != null && lib != null) {
+                long loop = loopBytes(space[0], bytes);
+                if (loop > 0) labels[i] += " · about " + Math.round(loop / bytesPerHour()) + " h";
+            }
+        }
+        new AlertDialog.Builder(this, AlertDialog.THEME_HOLO_DARK)
+                .setTitle("Space for regular recordings (saved clips extra)")
+                .setSingleChoiceItems(labels, checked, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        d.dismiss();
+                        settings.maxGb = values.get(which);
+                        try {
+                            settings.write(MainActivity.this);
+                        } catch (java.io.IOException e) {
+                            Toast.makeText(MainActivity.this, "Couldn't save: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        Toast.makeText(MainActivity.this, settings.maxGb == 0
+                                ? "Recordings can use the whole drive."
+                                : "From the next file, the oldest recordings are deleted to stay under "
+                                        + Fmt.size(Math.round(settings.maxGb * 1e9)) + ".",
+                                Toast.LENGTH_LONG).show();
+                        refresh(false);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private static String commandText(RecordCommand command) {

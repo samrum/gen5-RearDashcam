@@ -27,11 +27,13 @@ Two more NEMESIS services support the recorder: `svc/watchdog.sh` kills it if it
 - Encoded video is written as MPEG-TS files, one per minute by default, named by start time (`20261026_220609.ts`). A new file always starts on a keyframe. The file is synced to the drive every second, so a sudden power cut loses at most about a second.
 - There's no audio; the camera has none.
 - Before each new file, the oldest files in the `Dashcam` folder are deleted until the chosen share of the drive is free. Files in `Saved` and `Snapshots` are never touched.
+- With a space limit set (see [Settings](#settings)), the oldest files are also deleted until the recordings in the `Dashcam` folder are under the limit with room for the next file. `Saved` and `Snapshots` don't count: they come on top of the limit. Saving moves files out of the loop, so it frees room in the limit rather than using it.
+- Adding up the recordings means a stat for every file over the drive's FUSE mount, which can take seconds with thousands of files, so it runs on a thread of its own: when recording starts, and every 30 minutes. In between, the recorder counts the files it writes and deletes. Until the first count finishes, only the free-space rule applies.
 - Normal recording waits until the drive is mounted at `/storage/usb0`, so it never fills the head unit's internal storage.
 
 ### Settings
 
-Normal recording has one setting: on or off (tap the status at the top of the main screen). Recording quality is fixed, at what's been tested: 720×480 at 20 fps, 3 Mbit/s (about 1.35 GB an hour), one file a minute, and 5% of the drive kept free.
+Normal recording has two settings: on or off (tap the status at the top of the main screen), and how much of the drive recordings may use (tap the drive space next to it). Saved clips and snapshots come on top of the limit; the choices stop below the drive's size, and each shows about how many hours it keeps. A new limit takes effect at the next file, within a minute. Recording quality is fixed, at what's been tested: 720×480 at 20 fps, 3 Mbit/s (about 1.35 GB an hour), one file a minute, and 5% of the drive kept free.
 
 To experiment, the recorder takes arguments in `/data/nemesis/apps/dashcam/dashcam.conf` (`DASHCAM_ARGS="--fps=15"`). Updating the package replaces that file.
 
@@ -41,6 +43,7 @@ To experiment, the recorder takes arguments in `/data/nemesis/apps/dashcam/dashc
 | `--bitrate` | `3000000` | H.264 bits per second |
 | `--segment` | `60` | seconds per file |
 | `--min-free-percent` | `5` | the oldest files are deleted to keep this share of the drive free |
+| `--max-gb` | `0` | the most the recordings in `Dashcam` may use, in GB (decimals allowed, at least 1), not counting `Saved` and `Snapshots`; 0 is no limit. The app's setting replaces it once chosen there |
 | `--out` | `/storage/usb0/Dashcam` | where recordings go |
 | `--mount` | `/storage/usb0` | recording waits until this is mounted |
 | `--width`, `--height` | `720`, `480` | recording size; the camera hardware scales to it. The width must be a multiple of 16 |
@@ -328,7 +331,7 @@ The main recording button has a fixed width measured from all its status labels.
 Its indicator is red while recording and amber while waiting. Neither recording toggle uses a selected border. Recording commands
 hold their pending display until acknowledged by the recorder, ignoring stale
 polls; the control becomes usable again after a ten-second timeout if no answer
-arrives. `tests/record-command.sh` covers stale polls, transitions and the timeout.
+arrives. `tests/record-command.sh` covers stale polls, transitions and the timeout. `tests/storage-limit.sh` covers the space limit: oldest first, saved clips kept and not counted, live changes and the settings.
 
 Settings changes compare file length as well as modification time, because this
 KitKat build can timestamp consecutive writes in the same second. This prevents

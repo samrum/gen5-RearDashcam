@@ -428,12 +428,19 @@ final class Guard extends Thread {
     private void checkAppSettings() {
         long m = appConf.lastModified(), length = appConf.length();
         // KitKat can report file timestamps only to the second. enabled=true/false
-        // have different lengths, so rapid toggles must also compare the length.
+        // have different lengths, so rapid toggles must also compare the length. (A size limit
+        // changed twice within a second to one as long misses the second change until the next
+        // write; the app's dialog can't be that quick.)
         if (m == appConfModified && length == appConfLength) return;
         appConfModified = m;
         appConfLength = length;
         Config fresh = config.withAppSettings();
         saveSettingsCopy();
+        if (fresh.maxBytes != config.maxBytes) {
+            config.maxBytes = fresh.maxBytes;  // the writer's Storage reads it before each segment
+            lastState = null;  // the status file shows it
+            Log.i("recordings may now use " + Config.describeLimit(fresh.maxBytes) + " (set in the app)");
+        }
         if (fresh.enabled == !disabled) return;
         disabled = !fresh.enabled;
         Log.i("recording turned " + (fresh.enabled ? "on" : "off") + " in the app");
@@ -463,7 +470,7 @@ final class Guard extends Thread {
         if (key.equals(lastState)) return;
         String text = "state=" + state + "\nenabled=" + !disabled + "\nsince=" + System.currentTimeMillis() + "\nout=" + config.outDir
                 + "\nmount=" + config.mount + "\nfps=" + config.fps + "\nbitrate=" + config.bitrate
-                + "\nsegment=" + config.segmentSeconds + "\nminfree=" + config.minFreePercent
+                + "\nsegment=" + config.segmentSeconds + "\nminfree=" + config.minFreePercent + "\nmaxbytes=" + config.maxBytes
                 + "\ndrive=" + driveMounted + "\n";
         try {
             StateFile.write(status, text.getBytes(StandardCharsets.US_ASCII), true);
