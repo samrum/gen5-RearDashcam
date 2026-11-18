@@ -55,6 +55,11 @@ final class Guard extends Thread {
     private static final long STORAGE_NOTICE_MS = 60000;
     private static final int UNSUPPORTED_CAMERA_TYPE = 6;
     private static final long RETRY_MS = 5000;
+    /**
+     * Uptime before which a reverse may still be the boot camera's, whose frames we can't read: the
+     * recorder starting in reverse this early is the head unit starting in reverse, not a restart.
+     */
+    private static final long BOOT_CAMERA_MS = 120_000;
     /** The status-bar dot shows while a frame has gone into a segment file within this long. */
     private static final long WRITING_MS = 3000;
     /** The ignition reading off this many polls in a row (about a second) means the car is off. */
@@ -96,6 +101,12 @@ final class Guard extends Thread {
             recorder.startPreview();
         }
     };
+    private final Runnable startInReverse = new Runnable() {
+        @Override
+        public void run() {
+            recorder.startInReverse();
+        }
+    };
     private final Runnable startEncoding = new Runnable() {
         @Override
         public void run() {
@@ -115,6 +126,8 @@ final class Guard extends Thread {
         }
     };
     private volatile long lastBlockMs = -SETTLE_MS;
+    /** Guard thread only: this reverse is the boot camera's; don't record it. Cleared when it ends. */
+    private boolean bootReverse;
     /** Uptime of the main-thread check-in waiting to run, or 0 if none is. */
     private volatile long mainCheckPostedMs;
     private final Runnable mainCheck = new Runnable() {
@@ -247,7 +260,21 @@ final class Guard extends Thread {
                     state = offState;
                 } else if (blocked) {
                     state = "reverse";
+                    // Came up while the stock view has the camera: record its frames meanwhile,
+                    // unless it's the boot camera's reverse, whose frames we can't read. That's
+                    // decided once per reverse, uptime first so nothing is sent to the early
+                    // camera's device while it's being taken over at start-up.
+                    if (!bootReverse && canRecord && now >= nextStart) {
+                        if (now < BOOT_CAMERA_MS || EarlyCamera.isUp()) {
+                            bootReverse = true;
+                            Log.i("in reverse at start-up: the boot camera's picture can't be recorded; recording starts after reverse");
+                        } else {
+                            nextStart = now + RETRY_MS;
+                            main.post(startInReverse);
+                        }
+                    }
                 } else {
+                    bootReverse = false;
                     if (now >= nextStart) {
                         nextStart = now + RETRY_MS;
                         mounted = wantPreview || (driveMounted && !writeFailed);

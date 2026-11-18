@@ -62,6 +62,22 @@ final class EarlyCamera {
         SystemClock.sleep(SETTLE_MS);
     }
 
+    /**
+     * True while the early camera may still be showing reverse (the Cortex-M is loaded): its frames
+     * aren't the camera HAL's BGRA ring, so there's nothing to record from them.
+     */
+    private static boolean knockFailedLogged;
+
+    static boolean isUp() {
+        try {
+            return knock() == 1;
+        } catch (Throwable t) {
+            if (!knockFailedLogged) Log.e("early camera: can't knock", t);
+            knockFailedLogged = true;
+            return false;
+        }
+    }
+
     /** The kernel's knock: 1 while the Cortex-M is loaded, 0 once it's unloaded. */
     private static int knock() throws Exception {
         FileDescriptor fd = Libcore.os.open(DEVICE, OsConstants.O_RDWR, 0);
