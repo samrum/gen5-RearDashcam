@@ -50,6 +50,12 @@ final class Recorder {
     private static final long GUIDE_LINES_SETTLE_NS = 300_000_000L;
     private static final long STATS_MS = 30_000;
     /**
+     * Uptime before which a reverse may still be the boot camera's, whose frames we can't read: the
+     * recorder starting in reverse this early is the head unit starting in reverse, not a restart.
+     */
+    private static final long BOOT_CAMERA_MS = 120_000;
+    private boolean bootReverseLogged;
+    /**
      * Frame sizes the stock view might use (the analog camera's is 1140x720), and how the camera
      * memory is sampled to find out which: 16 pixels from the middle of every 16 KiB, read
      * FIND_PASSES times FIND_PASS_MS apart.
@@ -182,6 +188,14 @@ final class Recorder {
      * as after a hand-off, without touching the camera. takeBack opens it once reverse is over.
      */
     void startInReverse() {
+        if (active) return;
+        // At ignition in reverse, the picture comes from the early camera (or the stock view
+        // taking it over) in a layout we can't read: recording starts once reverse is over.
+        if (EarlyCamera.isUp() || SystemClock.uptimeMillis() < BOOT_CAMERA_MS) {
+            if (!bootReverseLogged) Log.i("in reverse at start-up: the boot camera's picture can't be recorded; recording starts after reverse");
+            bootReverseLogged = true;
+            return;
+        }
         start(false, true);
     }
 
