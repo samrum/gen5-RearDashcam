@@ -51,6 +51,18 @@ final class Guard extends Thread {
     private static final long POLL_MS = 50, STATE_POLL_MS = 250;
     /** After the last reverse or stock-camera signal, wait this long before taking the camera back. */
     private static final long SETTLE_MS = 3000;
+    /**
+     * While recording the stock view's frames, there's no picture of our own until the camera is
+     * back, so take it back sooner: once this long has passed and the stock view has closed it.
+     */
+    private static final long PASSIVE_SETTLE_MS = 500;
+    /**
+     * But not sooner than this after handing it over: a tap into reverse has the stock view still
+     * opening the camera, before its service reports it open.
+     */
+    private static final long PASSIVE_MIN_MS = 2000;
+    /** While the stock view still has the camera after reverse, look again this often. */
+    private static final long STOCK_RECHECK_MS = 500;
     private static final long RELEASE_TIMEOUT_MS = 800;
     private static final long STORAGE_NOTICE_MS = 60000;
     private static final int UNSUPPORTED_CAMERA_TYPE = 6;
@@ -115,6 +127,10 @@ final class Guard extends Thread {
         }
     };
     private volatile long lastBlockMs = -SETTLE_MS;
+    /** Guard thread only: "still has the camera" was logged since the last take-back. */
+    private boolean stockStillOpenLogged;
+    /** When the camera was last handed over to the stock view, and when to look at taking it back. */
+    private volatile long handedOffMs, nextTakeBackCheck;
     /** Uptime of the main-thread check-in waiting to run, or 0 if none is. */
     private volatile long mainCheckPostedMs;
     private final Runnable mainCheck = new Runnable() {
@@ -195,7 +211,7 @@ final class Guard extends Thread {
                 }
                 nextStatePoll = now + STATE_POLL_MS;
                 boolean carOff = carOff();
-                boolean blocked = now - lastBlockMs < SETTLE_MS;
+                boolean blocked = now - lastBlockMs < (recorder.isPassive() ? PASSIVE_SETTLE_MS : SETTLE_MS);
                 if (beat % 4 == 0) checkAppSettings();
                 // A failed write is usually the drive being pulled: hold off recording, and look again now.
                 boolean writeFailed = now - recorder.writeFailedMs() < RETRY_MS;
@@ -230,12 +246,15 @@ final class Guard extends Thread {
                         release("turned off");
                     } else if (blocked) {
                         if (!recorder.isPassive()) handOff(gear == GEAR_REVERSE ? "reverse" : "stock camera");
-                    } else if (recorder.isPassive() && now >= nextStart) {
-                        nextStart = now + RETRY_MS;
+                    } else if (recorder.isPassive() && now >= nextTakeBackCheck && now - handedOffMs >= PASSIVE_MIN_MS) {
                         if (stockCameraOpen()) {
-                            Log.i("the stock view still has the camera; waiting");
-                            lastBlockMs = now;  // check again after SETTLE_MS
+                            // Look again soon: until the camera's back, nothing is recorded.
+                            if (!stockStillOpenLogged) Log.i("the stock view still has the camera; waiting");
+                            stockStillOpenLogged = true;
+                            nextTakeBackCheck = now + STOCK_RECHECK_MS;
                         } else {
+                            nextTakeBackCheck = now + RETRY_MS;
+                            stockStillOpenLogged = false;
                             main.post(takeBack);
                         }
                     }
@@ -322,6 +341,8 @@ final class Guard extends Thread {
             return;
         }
         Log.i("handing the camera over: " + why);
+        handedOffMs = SystemClock.uptimeMillis();
+        nextTakeBackCheck = 0;
         final CountDownLatch released = new CountDownLatch(1);
         main.postAtFrontOfQueue(new Runnable() {
             @Override
