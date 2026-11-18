@@ -53,16 +53,20 @@ final class Guard extends Thread {
     private static final long SETTLE_MS = 3000;
     /**
      * While recording the stock view's frames, there's no picture of our own until the camera is
-     * back, so take it back sooner: once this long has passed and the stock view has closed it.
+     * back, so take it back sooner: once this long has passed since the last reverse reading and
+     * the stock view has closed it. Long enough that a shift through D or N back into R while
+     * parking usually doesn't take it back in between.
      */
-    private static final long PASSIVE_SETTLE_MS = 500;
+    private static final long PASSIVE_SETTLE_MS = 1500;
     /**
-     * But not sooner than this after handing it over: a tap into reverse has the stock view still
-     * opening the camera, before its service reports it open.
+     * But not sooner than this after handing it over or the stock camera app starting: a tap into
+     * reverse has the stock view still opening the camera, before its service reports it open.
      */
     private static final long PASSIVE_MIN_MS = 2000;
-    /** While the stock view still has the camera after reverse, look again this often. */
-    private static final long STOCK_RECHECK_MS = 500;
+    /** While the stock view still has the camera after reverse, look again this often, then less often. */
+    private static final long STOCK_RECHECK_MS = 500, STOCK_RECHECK_SLOW_MS = 3000, STOCK_RECHECK_FAST_FOR_MS = 10_000;
+    /** "Closed" readings in a row, STOCK_RECHECK_MS apart, before taking the camera back. */
+    private static final int STOCK_CLOSED_READINGS = 2;
     private static final long RELEASE_TIMEOUT_MS = 800;
     private static final long STORAGE_NOTICE_MS = 60000;
     private static final int UNSUPPORTED_CAMERA_TYPE = 6;
@@ -127,10 +131,17 @@ final class Guard extends Thread {
         }
     };
     private volatile long lastBlockMs = -SETTLE_MS;
-    /** Guard thread only: "still has the camera" was logged since the last take-back. */
-    private boolean stockStillOpenLogged;
-    /** When the camera was last handed over to the stock view, and when to look at taking it back. */
-    private volatile long handedOffMs, nextTakeBackCheck;
+    /** "Still has the camera" was logged since the last hand-off. */
+    private volatile boolean stockStillOpenLogged;
+    /** "Closed" readings in a row since the last hand-off. */
+    private volatile int stockClosedReadings;
+    /** stockCameraOpen's last failure was logged; cleared once it works again. */
+    private boolean stockCheckFailedLogged;
+    /**
+     * When the camera was last handed over to the stock view (or the stock camera app started),
+     * when to look at taking it back, and when a take-back was last asked for.
+     */
+    private volatile long handedOffMs, nextTakeBackCheck, takenBackMs = -1;
     /** Uptime of the main-thread check-in waiting to run, or 0 if none is. */
     private volatile long mainCheckPostedMs;
     private final Runnable mainCheck = new Runnable() {
@@ -211,7 +222,10 @@ final class Guard extends Thread {
                 }
                 nextStatePoll = now + STATE_POLL_MS;
                 boolean carOff = carOff();
-                boolean blocked = now - lastBlockMs < (recorder.isPassive() ? PASSIVE_SETTLE_MS : SETTLE_MS);
+                // The short settle covers the whole reverse episode, take-back included: the recorder
+                // stops being passive as soon as it starts taking the camera back.
+                boolean quickSettle = recorder.isPassive() || lastBlockMs <= takenBackMs;
+                boolean blocked = now - lastBlockMs < (quickSettle ? PASSIVE_SETTLE_MS : SETTLE_MS);
                 if (beat % 4 == 0) checkAppSettings();
                 // A failed write is usually the drive being pulled: hold off recording, and look again now.
                 boolean writeFailed = now - recorder.writeFailedMs() < RETRY_MS;
@@ -247,14 +261,22 @@ final class Guard extends Thread {
                     } else if (blocked) {
                         if (!recorder.isPassive()) handOff(gear == GEAR_REVERSE ? "reverse" : "stock camera");
                     } else if (recorder.isPassive() && now >= nextTakeBackCheck && now - handedOffMs >= PASSIVE_MIN_MS) {
-                        if (stockCameraOpen()) {
-                            // Look again soon: until the camera's back, nothing is recorded.
+                        // Look again soon while it's likely to let go: until the camera's back,
+                        // nothing of our own is recorded. Can't tell counts as open, but only for
+                        // the full SETTLE_MS, after which it goes on as it always did.
+                        long recheck = now - lastBlockMs < STOCK_RECHECK_FAST_FOR_MS ? STOCK_RECHECK_MS : STOCK_RECHECK_SLOW_MS;
+                        if (stockCameraOpen(now - lastBlockMs < SETTLE_MS)) {
                             if (!stockStillOpenLogged) Log.i("the stock view still has the camera; waiting");
                             stockStillOpenLogged = true;
+                            stockClosedReadings = 0;
+                            nextTakeBackCheck = now + recheck;
+                        } else if (++stockClosedReadings < STOCK_CLOSED_READINGS) {
                             nextTakeBackCheck = now + STOCK_RECHECK_MS;
                         } else {
-                            nextTakeBackCheck = now + RETRY_MS;
-                            stockStillOpenLogged = false;
+                            // Soon again in case the recorder found it back in reverse and stayed;
+                            // a second ask after a take-back does nothing.
+                            nextTakeBackCheck = now + 1000;
+                            takenBackMs = now;
                             main.post(takeBack);
                         }
                     }
@@ -272,7 +294,7 @@ final class Guard extends Thread {
                         mounted = wantPreview || (driveMounted && !writeFailed);
                         if (!mounted) {
                             if (beat % 120 == 0) Log.i("waiting for " + config.mount);
-                        } else if (stockCameraOpen()) {
+                        } else if (stockCameraOpen(false)) {
                             Log.i("the stock view still has the camera; waiting");
                             lastBlockMs = now;  // the stock view is still up; check again after SETTLE_MS
                         } else {
@@ -327,6 +349,7 @@ final class Guard extends Thread {
     void onStockCamera() {
         Log.i("the stock camera app is starting");
         lastBlockMs = SystemClock.uptimeMillis();
+        handedOffMs = lastBlockMs;  // it opens the camera a while after this; don't race it
         if (recorder.isActive() && !recorder.isPassive()) handOff("stock camera");
     }
 
@@ -343,6 +366,8 @@ final class Guard extends Thread {
         Log.i("handing the camera over: " + why);
         handedOffMs = SystemClock.uptimeMillis();
         nextTakeBackCheck = 0;
+        stockClosedReadings = 0;
+        stockStillOpenLogged = false;
         final CountDownLatch released = new CountDownLatch(1);
         main.postAtFrontOfQueue(new Runnable() {
             @Override
@@ -421,10 +446,10 @@ final class Guard extends Thread {
         }
     }
 
-    /** True if the stock app has the rear camera open, per the rear camera service's dump. */
-    private boolean stockCameraOpen() {
+    /** True if the stock app has the rear camera open, per the rear camera service's dump; ifUnknown if that can't be read. */
+    private boolean stockCameraOpen(boolean ifUnknown) {
         IBinder service = ServiceManager.getService("media.rearcamera");
-        if (service == null) return false;
+        if (service == null) return ifUnknown;
         File dump = null;
         try {
             // A new file each time: a fixed name in the shared state directory could be a planted link.
@@ -435,11 +460,14 @@ final class Guard extends Thread {
             byte[] b = new byte[(int) Math.min(dump.length(), 64 * 1024)];
             try (FileInputStream in = new FileInputStream(dump)) {
                 int n = in.read(b);
-                return n > 0 && new String(b, 0, n, StandardCharsets.UTF_8).contains("Device is open");
+                boolean open = n > 0 && new String(b, 0, n, StandardCharsets.UTF_8).contains("Device is open");
+                stockCheckFailedLogged = false;
+                return open;
             }
         } catch (Throwable t) {
-            Log.e("can't check the rear camera service", t);
-            return false;
+            if (!stockCheckFailedLogged) Log.e("can't check the rear camera service", t);
+            stockCheckFailedLogged = true;
+            return ifUnknown;
         } finally {
             if (dump != null) dump.delete();
         }
