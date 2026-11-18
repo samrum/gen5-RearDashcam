@@ -12,7 +12,12 @@ CLASSPATH=$HERE/dashcam.jar app_process /system/bin dev.skramer.dashcam.UsbNotic
 wait_for_boot
 sleep 2  # don't spin if the recorder keeps failing at startup
 
-mkdir -p "$STATE" && chmod 777 "$STATE"
+# Shared with these root scripts, which can't write a directory the system uid owns: world-writable,
+# but sticky, so no other app can delete or replace the recorder's files. (The recorder also never
+# writes through a fixed name it didn't create; see StateFile.java.)
+mkdir -p "$STATE" && chmod 1777 "$STATE"
+# Fixed-name scratch files from older versions, and temporary files from a recorder that died.
+rm -f "$STATE/status.tmp" "$STATE/settings.tmp" "$STATE/rearcamera.txt" "$STATE"/.*.tmp "$STATE"/.rearcamera-*.txt
 restore_mirror_key
 rm -f "$STATE/disabled"  # 0.4 test builds kept the on/off setting here; the app has it now
 if [ -f "$LOG" ]; then

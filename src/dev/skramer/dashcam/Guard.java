@@ -64,6 +64,17 @@ final class Guard extends Thread {
     private static final long WRITING_MS = 3000;
     /** The ignition reading off this many polls in a row (about a second) means the car is off. */
     private static final int IGNITION_OFF_POLLS = 4;
+    /**
+     * The gear unreadable this many polls in a row counts as reverse: without it there's no telling
+     * when the stock view needs the camera (this firmware doesn't deliver CAMERA_APP_START here).
+     */
+    private static final int GEAR_UNKNOWN_POLLS = 3;
+    /**
+     * The main thread opens, hands off and releases the camera. If it hasn't run a check-in for
+     * this long, the heartbeat stops so the watchdog kills the process; in reverse, much sooner,
+     * the process kills itself: a camera call hung there would keep the stock view out.
+     */
+    private static final long MAIN_STALL_MS = 5000, REVERSE_MAIN_STALL_MS = 1000;
 
     private final Config config;
     private final Recorder recorder;
@@ -117,9 +128,19 @@ final class Guard extends Thread {
     private volatile long lastBlockMs = -SETTLE_MS;
     /** Guard thread only: this reverse is the boot camera's; don't record it. Cleared when it ends. */
     private boolean bootReverse;
+    /** Uptime of the main-thread check-in waiting to run, or 0 if none is. */
+    private volatile long mainCheckPostedMs;
+    private final Runnable mainCheck = new Runnable() {
+        @Override
+        public void run() {
+            mainCheckPostedMs = 0;
+        }
+    };
+    private boolean mainStallLogged;
     private boolean disabled;
     private long appConfModified, appConfLength;
     private int lastGear = -1;
+    private int gearUnknownPolls;
     private int ignitionOffPolls;
     private Boolean lastIgnition;
     private String lastState;
@@ -152,8 +173,10 @@ final class Guard extends Thread {
         if (disabled) Log.i("recording is turned off in the app");
         // Camera type 6 (360-view cars' digital camera) sends video only while the car shows its own
         // camera view. The installer refuses these cars; this is in case its check couldn't tell.
-        final boolean unsupported = RearCam.type() == UNSUPPORTED_CAMERA_TYPE;
-        if (unsupported) Log.w("camera type " + UNSUPPORTED_CAMERA_TYPE + " isn't supported (360 view cars); not recording");
+        final boolean noGear = gearStatus == null;
+        final boolean unsupported = noGear || RearCam.type() == UNSUPPORTED_CAMERA_TYPE;
+        if (noGear) Log.w("no way to read the gear, so reverse can't be detected; not using the camera");
+        else if (unsupported) Log.w("camera type " + UNSUPPORTED_CAMERA_TYPE + " isn't supported (360 view cars); not recording");
         boolean wasPreview = false;
         long nextStart = 0;
         boolean mounted = true;
@@ -161,15 +184,23 @@ final class Guard extends Thread {
         for (long beat = 0; ; ) {
             try {
                 long now = SystemClock.uptimeMillis();
+                long mainStalled = mainStalledMs(now);
                 int gear = gear();
                 if (gear != lastGear) {
                     Log.i("gear status " + gear);
                     lastGear = gear;
                 }
-                if (gear == GEAR_REVERSE) {
+                // Fail safe: a gear that can't be read might be reverse.
+                gearUnknownPolls = gear < 0 ? gearUnknownPolls + 1 : 0;
+                boolean gearUnknown = gearUnknownPolls >= GEAR_UNKNOWN_POLLS;
+                if (gearUnknownPolls == GEAR_UNKNOWN_POLLS) Log.w("can't read the gear; treating it as reverse until it reads again");
+                if (gear == GEAR_REVERSE || gearUnknown) {
                     mirror.allow(false);
                     lastBlockMs = now;
-                    if (recorder.isActive() && !recorder.isPassive()) handOff("reverse");
+                    if (mainStalled >= REVERSE_MAIN_STALL_MS) {
+                        dieForReverse("the main thread has been stuck for " + mainStalled + " ms in reverse");
+                    }
+                    if (recorder.isActive() && !recorder.isPassive()) handOff(gearUnknown ? "gear unreadable" : "reverse");
                 }
                 if (now < nextStatePoll) {
                     SystemClock.sleep(recorder.isActive() && !recorder.isPassive() ? POLL_MS : STATE_POLL_MS);
@@ -264,7 +295,15 @@ final class Guard extends Thread {
                 mirror.recording(writing ? MirrorFeed.RECORDING : disabled ? MirrorFeed.DISABLED
                         : !driveMounted ? MirrorFeed.NO_DRIVE : MirrorFeed.OTHER);
                 mirror.allow(!carOff && !blocked && !unsupported && recorder.isActive() && !recorder.isPassive());
-                if (beat % 4 == 0) writeHeartbeat(beat / 4);
+                if (beat % 4 == 0) {
+                    if (mainStalled < MAIN_STALL_MS) {
+                        writeHeartbeat(beat / 4);
+                        mainStallLogged = false;
+                    } else if (!mainStallLogged) {
+                        Log.w("the main thread has been stuck for " + mainStalled + " ms; stopping the heartbeat");
+                        mainStallLogged = true;
+                    }
+                }
                 beat++;
                 SystemClock.sleep(recorder.isActive() && !recorder.isPassive() ? POLL_MS : STATE_POLL_MS);
             } catch (Throwable t) {
@@ -340,6 +379,24 @@ final class Guard extends Thread {
         awaitRelease(done);
     }
 
+    /**
+     * How long the main thread has left a check-in waiting, posting a new one if none is: 0
+     * while it keeps up. A camera call that hangs there (open, start, release) shows up here.
+     */
+    private long mainStalledMs(long now) {
+        long posted = mainCheckPostedMs;
+        if (posted != 0) return now - posted;
+        mainCheckPostedMs = now;
+        main.post(mainCheck);
+        return 0;
+    }
+
+    /** Exits, which frees the camera for the stock view; the service script starts the recorder again. */
+    private static void dieForReverse(String why) {
+        Log.e(why + "; exiting to free the camera", null);
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     /** Waits for the camera to be released; if it isn't in time, dies, which frees it. */
     private static void awaitRelease(CountDownLatch done) {
         boolean ok;
@@ -348,10 +405,7 @@ final class Guard extends Thread {
         } catch (InterruptedException e) {
             ok = false;
         }
-        if (!ok) {
-            Log.e("camera release took over " + RELEASE_TIMEOUT_MS + " ms; exiting to free it", null);
-            android.os.Process.killProcess(android.os.Process.myPid());
-        }
+        if (!ok) dieForReverse("camera release took over " + RELEASE_TIMEOUT_MS + " ms");
     }
 
     /** RearCamera.getGearStatus(): asks the Cortex-M (/dev/tcc_cm_ctrl); 1 is reverse. */
@@ -359,7 +413,7 @@ final class Guard extends Thread {
         try {
             return Class.forName("android.hardware.RearCamera").getMethod("getGearStatus");
         } catch (Throwable t) {
-            Log.e("no RearCamera.getGearStatus(); relying on the stock camera broadcast alone", t);
+            Log.e("no RearCamera.getGearStatus(); reverse can't be detected", t);
             return null;
         }
     }
@@ -377,8 +431,10 @@ final class Guard extends Thread {
     private boolean stockCameraOpen() {
         IBinder service = ServiceManager.getService("media.rearcamera");
         if (service == null) return false;
-        File dump = new File(config.stateDir, "rearcamera.txt");
+        File dump = null;
         try {
+            // A new file each time: a fixed name in the shared state directory could be a planted link.
+            dump = File.createTempFile(".rearcamera-", ".txt", new File(config.stateDir));
             try (FileOutputStream out = new FileOutputStream(dump)) {
                 service.dump(out.getFD(), new String[0]);
             }
@@ -390,6 +446,8 @@ final class Guard extends Thread {
         } catch (Throwable t) {
             Log.e("can't check the rear camera service", t);
             return false;
+        } finally {
+            if (dump != null) dump.delete();
         }
     }
 
@@ -418,15 +476,14 @@ final class Guard extends Thread {
     /** Copies the app's settings file to the state directory, so they outlive a reinstall of the app. */
     private void saveSettingsCopy() {
         if (!appConf.isFile()) return;
-        File copy = config.savedSettings(), tmp = new File(config.stateDir, "settings.tmp");
-        try (FileInputStream in = new FileInputStream(appConf); FileOutputStream out = new FileOutputStream(tmp)) {
+        java.io.ByteArrayOutputStream copy = new java.io.ByteArrayOutputStream();
+        try (FileInputStream in = new FileInputStream(appConf)) {
             byte[] b = new byte[4096];
-            for (int n; (n = in.read(b)) > 0; ) out.write(b, 0, n);
+            for (int n; (n = in.read(b)) > 0 && copy.size() < 64 * 1024; ) copy.write(b, 0, n);
+            StateFile.write(config.savedSettings(), copy.toByteArray(), false);
         } catch (IOException e) {
             Log.e("can't keep a copy of the app's settings", e);
-            return;
         }
-        if (!tmp.renameTo(copy)) Log.w("can't replace " + copy);
     }
 
     /**
@@ -438,20 +495,14 @@ final class Guard extends Thread {
     private void writeStatus(String state) {
         String key = state + " " + driveMounted + " " + disabled;
         if (key.equals(lastState)) return;
-        File tmp = new File(config.stateDir, "status.tmp");
         String text = "state=" + state + "\nenabled=" + !disabled + "\nsince=" + System.currentTimeMillis() + "\nout=" + config.outDir
                 + "\nmount=" + config.mount + "\nfps=" + config.fps + "\nbitrate=" + config.bitrate
                 + "\nsegment=" + config.segmentSeconds + "\nminfree=" + config.minFreePercent + "\nmaxbytes=" + config.maxBytes
                 + "\ndrive=" + driveMounted + "\n";
-        try (FileOutputStream out = new FileOutputStream(tmp)) {
-            out.write(text.getBytes(StandardCharsets.US_ASCII));
+        try {
+            StateFile.write(status, text.getBytes(StandardCharsets.US_ASCII), true);
         } catch (IOException e) {
-            Log.e("can't write " + tmp, e);
-            return;
-        }
-        tmp.setReadable(true, false);
-        if (!tmp.renameTo(status)) {
-            Log.w("can't replace " + status);
+            Log.e("can't write " + status, e);
             return;
         }
         lastState = key;
@@ -459,10 +510,9 @@ final class Guard extends Thread {
 
     /** "pid count": the watchdog service kills the process if the count stops changing. */
     private void writeHeartbeat(long count) {
-        try (FileOutputStream out = new FileOutputStream(heartbeat)) {
-            out.write((android.os.Process.myPid() + " " + count + "\n").getBytes(StandardCharsets.US_ASCII));
-            // The watchdog runs as NEMESIS root, which can't read past file permissions.
-            if (count == 0) heartbeat.setReadable(true, false);
+        try {
+            // Readable: the watchdog runs as NEMESIS root, which can't read past file permissions.
+            StateFile.write(heartbeat, (android.os.Process.myPid() + " " + count + "\n").getBytes(StandardCharsets.US_ASCII), true);
         } catch (IOException e) {
             if (count % 60 == 0) Log.e("can't write " + heartbeat, e);
         }

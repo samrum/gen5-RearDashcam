@@ -284,8 +284,11 @@ final class Recorder {
 
     /** Opens the camera at the session's size, with its feed (not started), guide lines off. */
     private void openCamera() throws Exception {
-        // The guard checked the gear before asking for this; it may have changed since.
-        if (RearCam.gear() == RearCam.GEAR_REVERSE) throw new IllegalStateException("in reverse");
+        // The guard checked the gear before asking for this; it may have changed since. A gear that
+        // can't be read might be reverse.
+        int gear = RearCam.gear();
+        if (gear == RearCam.GEAR_REVERSE) throw new IllegalStateException("in reverse");
+        if (gear < 0) throw new IllegalStateException("can't read the gear");
         EarlyCamera.stop();
         boolean hidLines = guideLines != null && guideLines.hide();
         final RearCam[] opened = new RearCam[1];

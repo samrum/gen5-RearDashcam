@@ -52,6 +52,11 @@ final class Config implements Cloneable {
      */
     String saveButton = "auto:37";
     int saveSeconds = 120;
+    /**
+     * Hold the steering wheel's Mode button to open the Digital Rearview Mirror. Off by default:
+     * it takes over the firmware's long-Mode broadcast, which other tweaks (CarPlay) may use.
+     */
+    boolean mirrorModeKey = false;
     /** Recording turned on in the app. */
     boolean enabled = true;
     /**
@@ -83,6 +88,7 @@ final class Config implements Cloneable {
                 case "hide-guide-lines": c.hideGuideLines = Boolean.parseBoolean(v); break;
                 case "save-button": c.saveButton = v; break;
                 case "save-seconds": c.saveSeconds = Integer.parseInt(v); break;
+                case "mirror-mode-key": c.mirrorModeKey = Boolean.parseBoolean(v); break;
                 case "app-conf": c.appConf = v; break;
                 default: throw new IllegalArgumentException("unknown setting: " + k);
             }
@@ -112,8 +118,11 @@ final class Config implements Cloneable {
     Config withAppSettings() {
         Config c = copy();
         java.io.File f = new java.io.File(appConf);
-        if (!f.isFile()) f = savedSettings();
-        if (!f.isFile()) return c;
+        if (!f.isFile()) {
+            // The copy is in the shared state directory: only trust one this uid wrote.
+            f = savedSettings();
+            if (!StateFile.ours(f)) return c;
+        }
         try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f))) {
             // Older apps also saved fps, bitrate, segment and minfree; those are fixed now.
             for (String line; (line = r.readLine()) != null; ) {

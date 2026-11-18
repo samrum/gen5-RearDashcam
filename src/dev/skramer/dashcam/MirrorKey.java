@@ -87,11 +87,7 @@ final class MirrorKey extends Binder implements Runnable {
             }
             // The root watchdog installs the scoped broadcast filter only while this is fresh.
             if (MirrorFeed.appUid() < 0) throw new IllegalStateException("mirror app not installed");
-            boolean created = !ready.exists();
-            try (java.io.FileOutputStream out = new java.io.FileOutputStream(ready)) {
-                out.write(Long.toString(android.os.SystemClock.uptimeMillis()).getBytes("US-ASCII"));
-            }
-            if (created) ready.setReadable(true, false);
+            StateFile.write(ready, Long.toString(android.os.SystemClock.uptimeMillis()).getBytes("US-ASCII"), true);
         } catch (Exception e) { ready.delete(); service = null; Log.w("mirror Mode trigger unavailable: " + e); }
         main.postDelayed(this, 1000);
     }

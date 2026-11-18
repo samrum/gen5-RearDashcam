@@ -4,6 +4,7 @@
 # The recorder handles a slow camera release itself; this is the backstop. NEMESIS restarts it.
 cd /data/nemesis/apps/dashcam || exit 1
 . ./scripts/common.sh
+. ./dashcam.conf  # DASHCAM_ARGS, for mirror_key_wanted
 wait_for_boot
 
 # Overridable for tests: seconds between checks, and how many unchanged checks mean wedged.

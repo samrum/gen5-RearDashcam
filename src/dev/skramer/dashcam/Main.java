@@ -45,7 +45,10 @@ public final class Main {
         recorder[0] = new Recorder(config, main);
         recorder[0].mirrorFeed = mirror;
         new Guard(config, recorder[0], mirror).start();
-        main.post(new MirrorKey(main, new java.io.File(config.stateDir), mirror));
+        // Without the Mode listener there's no heartbeat, so the watchdog keeps the long-Mode
+        // broadcast filter removed and the firmware's own long-Mode action (or a tweak's) stays.
+        if (config.mirrorModeKey) main.post(new MirrorKey(main, new java.io.File(config.stateDir), mirror));
+        else Log.i("mirror Mode trigger off (--mirror-mode-key=false)");
         if (saveButton != null) saveButton.start();
         Looper.loop();
     }
