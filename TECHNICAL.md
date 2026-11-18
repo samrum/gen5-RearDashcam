@@ -245,8 +245,16 @@ Socket closure or recorder death also restores alpha. SIGTERM, SIGINT and SIGHUP
 ask the helper to restore and exit. Restoration preserves the current DMA enable
 bit and respects a camera-driver reset: it only restores the saved alpha when
 the expected alpha selection and camera size are still present. Cleanup never
-re-enables a stopped camera plane. A forced SIGKILL cannot run cleanup; the
-camera driver's subsequent stop/start resets its layer configuration. Live
+re-enables a stopped camera plane. A forced SIGKILL cannot run cleanup in the
+process it kills, so the helper runs as two: after mapping the registers and
+dropping root it forks, and the child does all of the above. The parent only
+waits. It shares the lease state (what was saved, what is hidden or blacked
+out) with the child through a shared anonymous page, so when the child dies
+without cleanup (low-memory kill, crash) the parent undoes the lease and starts
+another child, which keeps the overlay working without a reboot. If the parent
+is the one killed, the child gets SIGTERM (`PR_SET_PDEATHSIG`) and cleans up
+itself. Only both being killed together leaves a lease in place; then the
+camera driver's next stop/start resets the camera's own alpha. Live
 writes are confined to volatile display registers, not persistent storage.
 
 Between ownership changes the helper blocks in socket I/O: no per-frame work,
@@ -293,16 +301,24 @@ of the camera, and the UI guard still keeps the hide frames showing the UI's
 last frame rather than a black rectangle.
 
 The black-out is only applied when the mixer reads as expected: priority 24 and
-Telechips' defaults in block 1 (`0x10622662`, `0x20c44cc4`, at the tcc802x
-offsets, which match this unit's WMIX size register). Otherwise it logs the
-mixer's values and the lease goes on without it. It is undone before the
-helper acknowledges a release, so the stock reverse view always gets the default;
-also when the lease's socket closes, when the helper is stopped, when the camera
-driver resets the camera's alpha during a lease, and at the next helper start if
-a killed helper left it set. It only puts the default back if the register still
-holds its own value. If it were ever left set, the camera driver's restart turns
-the camera's alpha off, which should make it count as opaque again, so pixel ×
-alpha would still show the stock view; that has not been checked on the car.
+Telechips' defaults in block 1 (alpha control `0x10622662`, color control
+`0x20c44cc4`, ROP control `0x0000c018`, whose alpha selection takes the layers'
+own alpha, at the tcc802x offsets, which match this unit's WMIX size register).
+Otherwise it logs the mixer's values and the lease goes on without it. It is
+undone before the helper acknowledges a release, and the helper waits (up to
+40 ms) for the mixer's update bit to clear, so the stock reverse view gets the
+default; also when the lease's socket closes, when the helper is stopped, when
+the camera driver resets the camera's alpha during a lease, and by the
+supervising parent if the helper dies. It only puts the default back if the
+register still holds its own value; a black value found at start, or by a new
+lease, is put back or taken over. If it were ever left set, the camera driver's
+restart turns the camera's alpha off, which should make it count as opaque again,
+so pixel × alpha would still show the stock view; that has not been checked on
+the car, so check it before relying on this (see the PR's test steps).
+
+A side effect: UI pixels that aren't fully opaque over the camera's rectangle
+now blend with black during a lease, so they look darker than on a stock unit,
+where they'd show unblended.
 
 The chroma key could drop the layer out entirely, but nothing resets it when the
 camera restarts, so a helper killed while it was set would leave the stock

@@ -13,7 +13,7 @@ int main(void) {
     REG(0x524) = 0xab12cd34;
     REG(0x424) = 0x11000000;
     REG(0x1808) = 0x02d00780;
-    REG(WMIX_CTRL) = OVP_UI_CAMERA_VIDEO; REG(WMIX_CAMERA_ACON) = ACON_DEFAULT; REG(WMIX_CAMERA_CCON) = CCON_DEFAULT;
+    REG(WMIX_CTRL) = OVP_UI_CAMERA_VIDEO; REG(WMIX_CAMERA_ACON) = ACON_DEFAULT; REG(WMIX_CAMERA_CCON) = CCON_DEFAULT; REG(WMIX_CAMERA_ROPC) = ROPC_DEFAULT;
     uint32_t ctrl = REG(0x500), alpha = REG(0x524);
     assert(!hide(1280, 720));
     assert(REG(0x500) == ctrl && REG(0x524) == alpha);
@@ -69,11 +69,11 @@ int main(void) {
     /* The mixer: left alone when laid out differently or already changed by someone else. */
     REG(WMIX_CTRL) = 5;
     assert(hide(720, 480));
-    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && !blacked);
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && !st->blacked);
     restore();
     REG(WMIX_CTRL) = OVP_UI_CAMERA_VIDEO; REG(WMIX_CAMERA_CCON) = 0x20c44cc0;
     assert(hide(720, 480));
-    assert(REG(WMIX_CAMERA_CCON) == 0x20c44cc0 && !blacked);
+    assert(REG(WMIX_CAMERA_CCON) == 0x20c44cc0 && !st->blacked);
     restore();
     REG(WMIX_CAMERA_CCON) = CCON_DEFAULT;
     assert(hide(720, 480) && REG(WMIX_CAMERA_CCON) == CCON_BLACK);
@@ -82,17 +82,31 @@ int main(void) {
     assert(REG(WMIX_CAMERA_CCON) == 0x11111111);
     REG(WMIX_CAMERA_CCON) = CCON_DEFAULT;
     /* The camera driver restarting the camera under the lease: back to the default at once. */
-    assert(hide(720, 480) && blacked);
+    assert(hide(720, 480) && st->blacked);
     REG(0x500) = ctrl;
     guard_ui();
-    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && !blacked);
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && !st->blacked);
     restore();
-    /* A killed helper's leftover, put back by the next one. */
-    REG(WMIX_CAMERA_CCON) = CCON_BLACK;
+    /* A constant-alpha ROP selection: left alone. */
+    REG(WMIX_CAMERA_ROPC) = 0x00000018;
+    assert(hide(720, 480) && !st->blacked && REG(WMIX_CAMERA_CCON) == CCON_DEFAULT);
+    restore();
+    REG(WMIX_CAMERA_ROPC) = ROPC_DEFAULT;
+    /* A leftover black value, whatever the priority: put back at start, or taken over by a lease. */
+    REG(WMIX_CTRL) = 5; REG(WMIX_CAMERA_CCON) = CCON_BLACK;
     black_leftover();
     assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT);
     black_leftover();
     assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT);
+    REG(WMIX_CTRL) = OVP_UI_CAMERA_VIDEO; REG(WMIX_CAMERA_CCON) = CCON_BLACK;
+    assert(hide(720, 480) && st->blacked);
+    restore();
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT);
+    /* What a supervising parent does for a child that died mid-lease: the shared state undoes it. */
+    REG(0x500) = ctrl; REG(0x524) = alpha;
+    assert(hide(720, 480) && st->hidden && st->blacked);
+    restore();
+    assert(REG(0x524) == alpha && REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && !st->hidden && !st->blacked);
     puts("mixer black-out, restore, foreign-change, camera-restart and leftover cases passed");
     puts("overlay guards, alpha restore, disabled-camera, driver-reset and UI-guard cases passed");
     return 0;
