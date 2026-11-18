@@ -160,8 +160,10 @@ RDMA0 is the UI, RDMA1 is the camera, and normal wired Android Auto video uses
 RDMA3. The camera's direct-display plane sits above projected video, so keeping
 the camera open for recording used to cover Android Auto. The native helper
 makes the camera plane transparent while DMA keeps feeding camera RAM. Recording
-continues with normal video cropping and UI composition. Overlay priority, video
-routing and SurfaceFlinger settings are not changed.
+continues with normal video cropping and UI composition. While it holds the
+camera it also has the mixer show the camera as black wherever no video is under
+it, so it can't flash through the UI. Overlay priority, video routing and
+SurfaceFlinger settings are not changed.
 
 ### Boot privileges and register mapping
 
@@ -207,11 +209,15 @@ range, the requested size, the frame address and four-buffer ring bounds against
 | `0x1200050c` | Read camera frame base address |
 | `0x12000524` | RDMA1 constant alpha fields, mask `0x00ff00ff` |
 | `0x12001808` | Read WMIX0 dimensions; require `0x02d00780` (1920×720) |
+| `0x12001800` | WMIX0 control: overlay priority bits 0-4 (require 24), update bit 16 |
+| `0x12001850` | WMIX0 alpha control of alpha block 1 (the camera's); require the default `0x10622662` |
+| `0x12001854` | WMIX0 color control of alpha block 1; default `0x20c44cc4`, `0x20c04cc0` while blacked out |
 
 It saves the alpha fields and selection/enable bits, zeros both constant alpha
 values, enables alpha with select 0, and issues the RDMA update. The camera plane
-stays enabled and on screen so the DMA ring continues running. It does not write
-frame addresses, dimensions, the mixer's priority, or other display planes.
+stays enabled and on screen so the DMA ring continues running. It then blacks the
+camera out in the mixer (see [Switching screens](#switching-screens)). It does not
+write frame addresses, dimensions, the mixer's priority, or other display planes.
 
 ### Camera ownership and recovery
 
@@ -239,8 +245,16 @@ Socket closure or recorder death also restores alpha. SIGTERM, SIGINT and SIGHUP
 ask the helper to restore and exit. Restoration preserves the current DMA enable
 bit and respects a camera-driver reset: it only restores the saved alpha when
 the expected alpha selection and camera size are still present. Cleanup never
-re-enables a stopped camera plane. A forced SIGKILL cannot run cleanup; the
-camera driver's subsequent stop/start resets its layer configuration. Live
+re-enables a stopped camera plane. A forced SIGKILL cannot run cleanup in the
+process it kills, so the helper runs as two: after mapping the registers and
+dropping root it forks, and the child does all of the above. The parent only
+waits. It shares the lease state (what was saved, what is hidden or blacked
+out) with the child through a shared anonymous page, so when the child dies
+without cleanup (low-memory kill, crash) the parent undoes the lease and starts
+another child, which keeps the overlay working without a reboot. If the parent
+is the one killed, the child gets SIGTERM (`PR_SET_PDEATHSIG`) and cleans up
+itself. Only both being killed together leaves a lease in place; then the
+camera driver's next stop/start resets the camera's own alpha. Live
 writes are confined to volatile display registers, not persistent storage.
 
 Between ownership changes the helper blocks in socket I/O: no per-frame work,
@@ -269,15 +283,46 @@ the lowest real-time priority (set at boot, before it drops root). When the UI i
 hidden that way and no video layer is on, it sets RDMA0's constant alpha to
 opaque, so the UI's last frame shows as on a stock unit; when a video layer comes
 on, or the lease ends, it puts 0 back. With a video layer on it leaves the UI
-alone, so video shows through. A screen refresh can still fall between the
-composer's hide and the check, so now and then a single frame of camera shows.
-The checks cost about 1.3% of one core.
+alone, so video shows through. The checks cost about 1.3% of one core.
 
-Changing the camera layer's color control instead (pixel × alpha where nothing
-is under it) hides it with no delay, but then a black rectangle shows where the
-camera layer is. The chroma key could drop the layer out entirely, but nothing
-resets it when the camera restarts, so a helper killed while it was set would
-leave the stock reverse view invisible.
+That alone left two ways for the camera to show. A screen refresh can fall
+between the composer's hide and the check, so now and then a single frame of
+camera showed; and UI pixels that aren't fully opaque (the composer's
+framebuffer during some app transitions) let the camera through for as long as
+they're up. So during a lease the helper also blacks the camera out in the mixer.
+At overlay priority 24 WMIX0 stacks the UI (RDMA0) as layer 3, the camera
+(RDMA1) as layer 2 and the video layers under it, and alpha block 1 lays layer 2
+over what's under it. Its color control by default takes the camera's pixels as
+they are where nothing is under them (regions 00 and 10: pixel × 256). The helper
+sets those two regions to pixel × the camera's alpha, which is 0, so the camera
+is black where it's alone; region 11, over video, is untouched, so Android Auto
+still shows through. Either miss now shows black (or the UI over black) instead
+of the camera, and the UI guard still keeps the hide frames showing the UI's
+last frame rather than a black rectangle.
+
+The black-out is only applied when the mixer reads as expected: priority 24 and
+Telechips' defaults in block 1 (alpha control `0x10622662`, color control
+`0x20c44cc4`, ROP control `0x0000c018`, whose alpha selection takes the layers'
+own alpha, at the tcc802x offsets, which match this unit's WMIX size register).
+Otherwise it logs the mixer's values and the lease goes on without it. It is
+undone before the helper acknowledges a release, and the helper waits (up to
+40 ms) for the mixer's update bit to clear, so the stock reverse view gets the
+default; also when the lease's socket closes, when the helper is stopped, when
+the camera driver resets the camera's alpha during a lease, and by the
+supervising parent if the helper dies. It only puts the default back if the
+register still holds its own value; a black value found at start, or by a new
+lease, is put back or taken over. If it were ever left set, the camera driver's
+restart turns the camera's alpha off, which should make it count as opaque again,
+so pixel × alpha would still show the stock view; that has not been checked on
+the car, so check it before relying on this (see the PR's test steps).
+
+A side effect: UI pixels that aren't fully opaque over the camera's rectangle
+now blend with black during a lease, so they look darker than on a stock unit,
+where they'd show unblended.
+
+The chroma key could drop the layer out entirely, but nothing resets it when the
+camera restarts, so a helper killed while it was set would leave the stock
+reverse view invisible.
 
 Wired Android Auto, continuous camera capture, stock-camera handoff and recorder
 death recovery were checked on the NEEV23 unit. CarPlay and other units have not
