@@ -50,12 +50,6 @@ final class Recorder {
     private static final long GUIDE_LINES_SETTLE_NS = 300_000_000L;
     private static final long STATS_MS = 30_000;
     /**
-     * Uptime before which a reverse may still be the boot camera's, whose frames we can't read: the
-     * recorder starting in reverse this early is the head unit starting in reverse, not a restart.
-     */
-    private static final long BOOT_CAMERA_MS = 120_000;
-    private boolean bootReverseLogged;
-    /**
      * Frame sizes the stock view might use (the analog camera's is 1140x720), and how the camera
      * memory is sampled to find out which: 16 pixels from the middle of every 16 KiB, read
      * FIND_PASSES times FIND_PASS_MS apart.
@@ -188,21 +182,14 @@ final class Recorder {
      * as after a hand-off, without touching the camera. takeBack opens it once reverse is over.
      */
     void startInReverse() {
-        if (active) return;
-        // At ignition in reverse, the picture comes from the early camera (or the stock view
-        // taking it over) in a layout we can't read: recording starts once reverse is over.
-        if (EarlyCamera.isUp() || SystemClock.uptimeMillis() < BOOT_CAMERA_MS) {
-            if (!bootReverseLogged) Log.i("in reverse at start-up: the boot camera's picture can't be recorded; recording starts after reverse");
-            bootReverseLogged = true;
-            return;
-        }
         start(false, true);
     }
 
     private void start(boolean preview, boolean inReverse) {
         if (active) return;
         this.preview = preview;
-        cameraId = RearCam.stockId();
+        // In reverse, no camera HAL calls until the camera's taken back (takeBack sets it).
+        if (!inReverse) cameraId = RearCam.stockId();
         width = config.width;
         height = config.height;
         size = width + "x" + height;
@@ -214,8 +201,8 @@ final class Recorder {
             if (ram == null) ram = CameraRam.map();
             if (!ram.fits(width, height)) throw new IllegalStateException(CameraRam.SLOTS + " " + size + " frames don't fit");
             if (!preview) startEncoder();
-            Log.i((preview ? "preview: " : inReverse ? "starting in reverse: " : "") + "camera " + cameraId
-                    + " at " + size + ", camera type " + RearCam.type());
+            Log.i(inReverse ? "starting in reverse at " + size
+                    : (preview ? "preview: " : "") + "camera " + cameraId + " at " + size + ", camera type " + RearCam.type());
             startNs = System.nanoTime();
             lastPtsUs = -1;
             statsStartMs = SystemClock.uptimeMillis();
@@ -369,6 +356,7 @@ final class Recorder {
         endPassive();
         endFeed();
         try {
+            cameraId = RearCam.stockId();
             openCamera();
             feed.start();
         } catch (Throwable t) {

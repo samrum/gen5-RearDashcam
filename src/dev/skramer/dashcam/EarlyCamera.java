@@ -66,10 +66,14 @@ final class EarlyCamera {
      * True while the early camera may still be showing reverse (the Cortex-M is loaded): its frames
      * aren't the camera HAL's BGRA ring, so there's nothing to record from them.
      */
+    private static boolean knockFailedLogged;
+
     static boolean isUp() {
         try {
             return knock() == 1;
         } catch (Throwable t) {
+            if (!knockFailedLogged) Log.e("early camera: can't knock", t);
+            knockFailedLogged = true;
             return false;
         }
     }
