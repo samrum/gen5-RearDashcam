@@ -334,6 +334,10 @@ final class Recorder {
     /** After reverse: opens the camera again, into the same recording. If it can't, stops. */
     void takeBack() {
         if (!active || !passive) return;
+        // Back in reverse since the guard asked: stay on the stock view's frames rather than
+        // failing to open the camera, which would end the recording.
+        int gear = RearCam.gear();
+        if (gear == RearCam.GEAR_REVERSE || gear < 0) return;
         endPassive();
         endFeed();
         try {
