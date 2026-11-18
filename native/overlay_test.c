@@ -13,6 +13,7 @@ int main(void) {
     REG(0x524) = 0xab12cd34;
     REG(0x424) = 0x11000000;
     REG(0x1808) = 0x02d00780;
+    REG(WMIX_CTRL) = OVP_UI_CAMERA_VIDEO; REG(WMIX_CAMERA_ACON) = ACON_DEFAULT; REG(WMIX_CAMERA_CCON) = CCON_DEFAULT;
     uint32_t ctrl = REG(0x500), alpha = REG(0x524);
     assert(!hide(1280, 720));
     assert(REG(0x500) == ctrl && REG(0x524) == alpha);
@@ -21,8 +22,11 @@ int main(void) {
     assert((REG(0x500) & ENABLE) != 0);
     assert(REG(0x524) == (alpha & ~ALPHA_MASK));
     assert(REG(0x424) == 0x11000000);
+    assert(REG(WMIX_CAMERA_CCON) == 0x20c04cc0 && (REG(WMIX_CTRL) & WMIX_UPDATE));
     assert(!hide(720, 480));
+    REG(WMIX_CTRL) &= ~WMIX_UPDATE;
     restore();
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && (REG(WMIX_CTRL) & WMIX_UPDATE));
     assert(REG(0x500) == (ctrl | UPDATE));
     assert(REG(0x524) == alpha);
     assert(REG(0x424) == 0x11000000);
@@ -61,6 +65,35 @@ int main(void) {
     REG(0x424) |= UI_OPAQUE;
     restore();
     assert((REG(0x424) & ALPHA_MASK) == 0);
+    restore();
+    /* The mixer: left alone when laid out differently or already changed by someone else. */
+    REG(WMIX_CTRL) = 5;
+    assert(hide(720, 480));
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && !blacked);
+    restore();
+    REG(WMIX_CTRL) = OVP_UI_CAMERA_VIDEO; REG(WMIX_CAMERA_CCON) = 0x20c44cc0;
+    assert(hide(720, 480));
+    assert(REG(WMIX_CAMERA_CCON) == 0x20c44cc0 && !blacked);
+    restore();
+    REG(WMIX_CAMERA_CCON) = CCON_DEFAULT;
+    assert(hide(720, 480) && REG(WMIX_CAMERA_CCON) == CCON_BLACK);
+    REG(WMIX_CAMERA_CCON) = 0x11111111;                    /* changed under the lease: not ours to undo */
+    restore();
+    assert(REG(WMIX_CAMERA_CCON) == 0x11111111);
+    REG(WMIX_CAMERA_CCON) = CCON_DEFAULT;
+    /* The camera driver restarting the camera under the lease: back to the default at once. */
+    assert(hide(720, 480) && blacked);
+    REG(0x500) = ctrl;
+    guard_ui();
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT && !blacked);
+    restore();
+    /* A killed helper's leftover, put back by the next one. */
+    REG(WMIX_CAMERA_CCON) = CCON_BLACK;
+    black_leftover();
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT);
+    black_leftover();
+    assert(REG(WMIX_CAMERA_CCON) == CCON_DEFAULT);
+    puts("mixer black-out, restore, foreign-change, camera-restart and leftover cases passed");
     puts("overlay guards, alpha restore, disabled-camera, driver-reset and UI-guard cases passed");
     return 0;
 }

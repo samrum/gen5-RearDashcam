@@ -1,7 +1,7 @@
 /* Camera-layer alpha control for units whose device tree shows the tcc803x display layout.
  * Boot-started by NEMESIS for CAP_SYS_RAWIO. Only uid 1000 can request a camera
- * lease. During a lease it checks the UI layer every millisecond (guard_ui); no framebuffer
- * copies, overlay routing or mixer priority changes.
+ * lease. During a lease it checks the UI layer every millisecond (guard_ui) and blacks the camera
+ * out in the mixer (black_out); no framebuffer copies, overlay routing or mixer priority changes.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -49,6 +49,65 @@ static uint32_t camera_base, camera_end;
 #define UI_OPAQUE 0x00ff00ffu
 #define GUARD_MS 1
 
+/* That leaves the refresh the guard can miss, and UI pixels that aren't fully opaque (the
+ * composer's framebuffer during some app transitions): the camera showed through both. So during
+ * a lease the camera is also blacked out in the mixer. WMIX0 (tcc802x/803x layout: control at
+ * 0x00, size at 0x08, then an alpha block every 0x10 from 0x40) stacks the layers by overlay
+ * priority; at OVP 24 the UI (RDMA0) is layer 3, the camera (RDMA1) layer 2 and the video layers
+ * below it, and alpha block 1 lays layer 2 over what's under it. Its color control (Telechips'
+ * default 0x20c44cc4) takes the camera's pixels as they are where nothing is under them (regions
+ * 00 and 10: pixel x 256); with pixel x the camera's alpha there instead, and that alpha 0, the
+ * camera is black where it's alone and still blends away over video (region 11 is untouched). The
+ * stock view never sees it: restore puts the default back before the camera is handed over. */
+#define WMIX_CTRL 0x1800
+#define WMIX_CAMERA_ACON 0x1850
+#define WMIX_CAMERA_CCON 0x1854
+#define WMIX_UPDATE (1u << 16)
+#define OVP_UI_CAMERA_VIDEO 24
+#define ACON_DEFAULT 0x10622662u
+#define CCON_DEFAULT 0x20c44cc4u
+#define CCON_BLACK (CCON_DEFAULT & ~0x000f000fu)
+static int blacked;
+
+static void wmix_ccon(uint32_t value) {
+    REG(WMIX_CAMERA_CCON) = value;
+    __sync_synchronize();
+    REG(WMIX_CTRL) |= WMIX_UPDATE;
+    __sync_synchronize();
+}
+
+/* Blacks out the camera where nothing is under it, if the mixer is laid out as expected and
+ * nobody else has changed that color control. Without it, the UI guard alone still works. */
+static void black_out(void) {
+    uint32_t ctrl = REG(WMIX_CTRL), acon = REG(WMIX_CAMERA_ACON), ccon = REG(WMIX_CAMERA_CCON);
+    if (blacked) return;
+    if ((ctrl & 31) != OVP_UI_CAMERA_VIDEO || acon != ACON_DEFAULT || ccon != CCON_DEFAULT) {
+        fprintf(stderr, "overlay: camera not blacked out: wmix0 ctrl %08x acon/ccon %08x %08x %08x %08x "
+                "%08x %08x\n", ctrl, REG(0x1840), REG(0x1844), acon, ccon, REG(0x1860), REG(0x1864));
+        return;
+    }
+    wmix_ccon(CCON_BLACK);
+    blacked = 1;
+    fprintf(stderr, "overlay: camera blacked out where nothing is under it\n");
+}
+
+/* A helper killed during a lease (SIGKILL skips cleanup) leaves the camera blacked out; the next
+ * one to map the registers puts the default back. */
+static void black_leftover(void) {
+    if ((REG(WMIX_CTRL) & 31) != OVP_UI_CAMERA_VIDEO || REG(WMIX_CAMERA_CCON) != CCON_BLACK) return;
+    wmix_ccon(CCON_DEFAULT);
+    fprintf(stderr, "overlay: put back the mixer's default, left blacked out by an earlier helper\n");
+}
+
+/* Puts the mixer's default back, unless something else has changed it since. */
+static void black_back(void) {
+    if (!blacked) return;
+    blacked = 0;
+    if (REG(WMIX_CAMERA_CCON) != CCON_BLACK) return;
+    wmix_ccon(CCON_DEFAULT);
+    fprintf(stderr, "overlay: camera no longer blacked out\n");
+}
+
 /* Puts back the UI's constant alpha of 0 if it's our opaque one, for the next frame. */
 static void ui_alpha_back(void) {
     if ((REG(0x424) & ALPHA_MASK) != UI_OPAQUE) return;
@@ -60,6 +119,9 @@ static void ui_alpha_back(void) {
 
 /* One check of the UI layer; see above. */
 static void guard_ui(void) {
+    /* The camera driver restarting the camera under the lease resets the camera's alpha (and
+     * with that whether black is right); let the mixer go back to showing it. */
+    if (blacked && (REG(0x500) & (AEN | ASEL)) != AEN) black_back();
     uint32_t ui = REG(0x400), alpha = REG(0x424) & ALPHA_MASK;
     int hidden_ui = (ui & ENABLE) && (ui & AEN) && !(ui & ASEL);
     int video = (REG(0x600) & ENABLE) || (REG(0x700) & ENABLE);
@@ -78,6 +140,7 @@ static void guard_ui(void) {
 static void restore(void) {
     if (!hidden) return;
     ui_alpha_back();
+    black_back();
     uint32_t ctrl = REG(0x500);
     /* A camera restart resets AEN. Do not restore saved values into a new
      * session after the driver has already restored its own settings. */
@@ -113,6 +176,7 @@ static int hide(unsigned w, unsigned h) {
     REG(0x500) = (REG(0x500) & ~ASEL) | AEN | UPDATE;
     __sync_synchronize();
     fprintf(stderr, "overlay: camera transparent (%ux%u)\n", w, h);
+    black_out();
     return 1;
 }
 
@@ -187,6 +251,7 @@ int main(void) {
     regs = mmap(NULL, 0x2000, PROT_READ | PROT_WRITE, MAP_SHARED, mem, 0x12000000);
     close(mem);
     if (regs == MAP_FAILED) { perror("overlay: mmap"); return 1; }
+    black_leftover();
     /* The UI guard has to see the composer's hide before the next screen refresh, with the
      * recorder keeping the CPUs busy: lowest real-time priority. It sleeps between checks. */
     struct sched_param rt = {1};
