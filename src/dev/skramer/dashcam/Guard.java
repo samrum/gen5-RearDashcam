@@ -211,6 +211,7 @@ final class Guard extends Thread {
                 if (gear == GEAR_REVERSE || gearUnknown) {
                     mirror.allow(false);
                     lastBlockMs = now;
+                    stockClosedReadings = 0;
                     if (mainStalled >= REVERSE_MAIN_STALL_MS) {
                         dieForReverse("the main thread has been stuck for " + mainStalled + " ms in reverse");
                     }
@@ -277,6 +278,7 @@ final class Guard extends Thread {
                             // a second ask after a take-back does nothing.
                             nextTakeBackCheck = now + 1000;
                             takenBackMs = now;
+                            stockClosedReadings = 0;
                             main.post(takeBack);
                         }
                     }
@@ -350,6 +352,7 @@ final class Guard extends Thread {
         Log.i("the stock camera app is starting");
         lastBlockMs = SystemClock.uptimeMillis();
         handedOffMs = lastBlockMs;  // it opens the camera a while after this; don't race it
+        stockClosedReadings = 0;
         if (recorder.isActive() && !recorder.isPassive()) handOff("stock camera");
     }
 
