@@ -76,9 +76,9 @@ The head unit doesn't only run while you drive. It also starts up when you unloc
 
 Only one program can have the camera at a time, and while the dashcam has it, the car's backup view can't open.
 
-- While it owns the camera, the recorder reads the gear every 50 ms (`RearCamera.getGearStatus()`, which also reports the camera button); idle and passive recording use a 250 ms interval. In reverse it lets go of the camera at once. It takes the camera back 3 seconds after the last reverse reading, and only once the car's camera app has closed it (checked through the rear camera service's status).
+- While it owns the camera, the recorder reads the gear every 50 ms (`RearCamera.getGearStatus()`, which also reports the camera button); otherwise it uses a 250 ms interval. In reverse it lets go of the camera at once. It takes the camera back 3 seconds after the last reverse reading, and only once the car's camera app has closed it (checked through the rear camera service's status).
 - If the car's camera app tries to open the camera before the dashcam has let go, it fails and tries again every half second, for up to 15 seconds.
-- **Recording goes on through reverse.** The car's camera app runs the camera the same way, and its frames land in the same memory ring, at its own size (1140×720 on the analog-camera IONIQ 5). After letting go, the recorder samples that memory for a third of a second at a time until frames show up, and works out their size: the one for which every change has its counterparts in the other three frames of the ring, from a list of likely sizes. It then copies those frames out, reading only the rows it needs and scaling them to the recording size, into the same file. The guide lines are back on for you, so they're in this part. There's a gap of about a second while the camera changes hands, and another while the recorder takes it back; if no size fits, nothing is recorded until then. Each reverse ends with a log line: how long, the frame size, frames recorded.
+- **Recording pauses for reverse.** Letting go ends the recording: the camera is released first, then the guide lines go back on and the encoder and the segment file are closed, after the 0.8 s deadline below has already been met. Once the recorder takes the camera back, it starts a new segment file. So each reverse leaves a gap from the shift into R until about 3 seconds after leaving it. (Earlier versions went on recording the car's camera app's frames from the shared memory ring, at a size they had to guess; that cost CPU while the reverse view was up, guessed wrong at least once, and kept the recorder's main thread busy encoding during reverse, where a 1 s stall gets the recorder killed.)
 - **The early camera.** While the head unit starts, a separate processor in the chip (a Cortex-M) shows the backup camera on its own, so reverse works before Android is up; that's the plain picture with no on-screen buttons. The car's camera app normally ends it about 10 seconds after Android starts, and after a wake from unlocking the door it may not have yet when you switch the car on. If the camera is opened while the early camera still runs, the display path is set up twice (the kernel logs `RDMA1 was recovered` every frame), and going into reverse then gets the head unit reset by the car. So before every camera open the recorder asks the kernel whether the Cortex-M is still loaded (ioctl 4 on `/dev/tcc_cm_ctrl`; `RearCamera.knockEarlyCamera()` always returns 0, so it can't be used) and, if it is, stops it the way the car's camera app does: clears `persist.sys.earlycam.handover`, `RearCamera.stopEarlyCamera()` (up to three tries), then `disableCMControl()`, and waits half a second. It also reads the gear right before opening and doesn't open in reverse.
 - Letting go has 0.8 s to finish. If it doesn't, the recorder kills itself, which frees the camera too, and NEMESIS starts it again.
 - The recorder updates a heartbeat file every second. If the heartbeat stops for about 6 seconds, the watchdog kills the recorder.
@@ -123,7 +123,7 @@ Native dialog checks use the [OEM alert theme port](tools/emulator-theme/README.
 | `Dashcam/Saved/` | saved recordings, plus `names.txt` |
 | `Dashcam/Snapshots/` | snapshots from the player, as JPEG |
 | `/data/nemesis/dashcam.log` | the recorder's log (rotated at 1 MB) |
-| `/data/nemesis/dashcam/status` | state (recording, reversing, live, reverse, caroff, off, unsupported, nodrive, starting), configured enabled state and drive presence, for the app |
+| `/data/nemesis/dashcam/status` | state (recording, live, reverse, caroff, off, unsupported, nodrive, starting), configured enabled state and drive presence, for the app |
 | `/data/nemesis/dashcam/mirror-key-ready`, `mirror-key-filtered` | Mode-listener heartbeat and root watchdog's filter acknowledgement |
 | `/data/system/ifw/dashcam-mirror-mode.xml` | temporary default-long-Mode broadcast filter; removed on listener failure or uninstall |
 | `/data/nemesis/dashcam/settings` | the recorder's copy of the app's setting (recording on or off) |
@@ -286,10 +286,10 @@ and alpha guards/restoration against ordinary RAM rather than hardware registers
 
 Reverse detection polls every 50 ms while the recorder owns the camera. Other
 guard work runs on a 250 ms cycle; ignition is checked on that cycle, settings
-and heartbeat once per second. Idle and passive recording keep the 250 ms gear
-interval. The stock-camera broadcast still releases immediately. Passive
-ownership is published before acknowledging release, preventing a duplicate
-handoff while cleanup finishes.
+and heartbeat once per second. With the camera released, the gear is read every
+250 ms. The stock-camera broadcast still releases immediately. The recorder
+reads as inactive before it acknowledges the release, so the guard can't start
+a second handoff while the rest of the cleanup finishes.
 
 ## USB status-bar notices
 

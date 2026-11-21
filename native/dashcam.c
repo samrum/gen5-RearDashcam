@@ -109,20 +109,6 @@ void to_i420(const uint32_t *argb, int w, int h, uint8_t *out, int uoff, int vof
 #endif
 }
 
-/*
- * Copies one frame from the camera RAM at src (srcWidth pixels a row), keeping only the given
- * rows and columns. The RAM is mapped uncached, so each row is read whole, in one memcpy (the
- * fastest way to read that memory), then sampled from the copy.
- */
-void copy_scaled(const uint32_t *src, int srcWidth, const int *rows, int h, const int *cols, int w, uint32_t *dst) {
-    uint32_t line[srcWidth];
-    for (int r = 0; r < h; r++) {
-        memcpy(line, src + (size_t) rows[r] * srcWidth, (size_t) srcWidth * 4);
-        uint32_t *d = dst + (size_t) r * w;
-        for (int c = 0; c < w; c++) d[c] = line[cols[c]];
-    }
-}
-
 JNIEXPORT void JNICALL Java_dev_skramer_dashcam_Native_toI420(JNIEnv *env, jclass cls __attribute__((unused)), jintArray argb,
         jint w, jint h, jobject out, jint uoff, jint voff, jboolean mirror) {
     uint8_t *o = (*env)->GetDirectBufferAddress(env, out);
@@ -132,21 +118,6 @@ JNIEXPORT void JNICALL Java_dev_skramer_dashcam_Native_toI420(JNIEnv *env, jclas
     if (a == NULL) return;
     to_i420((const uint32_t *) a, w, h, o, uoff, voff, mirror);
     (*env)->ReleasePrimitiveArrayCritical(env, argb, a, JNI_ABORT);
-}
-
-JNIEXPORT void JNICALL Java_dev_skramer_dashcam_Native_copyScaled(JNIEnv *env, jclass cls __attribute__((unused)), jlong src, jint srcWidth,
-        jintArray rows, jintArray cols, jintArray dst) {
-    jint h = (*env)->GetArrayLength(env, rows), w = (*env)->GetArrayLength(env, cols);
-    if ((*env)->GetArrayLength(env, dst) < w * h) return;
-    jint *r = (*env)->GetPrimitiveArrayCritical(env, rows, NULL);
-    jint *c = (*env)->GetPrimitiveArrayCritical(env, cols, NULL);
-    jint *d = (*env)->GetPrimitiveArrayCritical(env, dst, NULL);
-    if (r != NULL && c != NULL && d != NULL) {
-        copy_scaled((const uint32_t *) (intptr_t) src, srcWidth, r, h, c, w, (uint32_t *) d);
-    }
-    if (d != NULL) (*env)->ReleasePrimitiveArrayCritical(env, dst, d, 0);
-    if (c != NULL) (*env)->ReleasePrimitiveArrayCritical(env, cols, c, JNI_ABORT);
-    if (r != NULL) (*env)->ReleasePrimitiveArrayCritical(env, rows, r, JNI_ABORT);
 }
 
 /* Same 32-bit hash as Java, reading the four DMA strips in one JNI call. */

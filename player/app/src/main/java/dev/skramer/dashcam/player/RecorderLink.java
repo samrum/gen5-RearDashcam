@@ -19,7 +19,7 @@ final class RecorderLink {
     /** The heartbeat is rewritten every second while the recorder runs. */
     private static final long HEARTBEAT_STALE_MS = 10_000;
 
-    /** recording, reversing, live, reverse, caroff, off, unsupported, nodrive, starting; or null if there's no status. */
+    /** recording, live, reverse, caroff, off, unsupported, nodrive, starting; or null if there's no status. */
     String state;
     long since;
     boolean running;

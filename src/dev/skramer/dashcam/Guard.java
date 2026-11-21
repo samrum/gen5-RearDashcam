@@ -24,10 +24,10 @@ import java.util.concurrent.TimeUnit;
  * input, and while the dashcam holds it the stock view can't open at all. So the camera is
  * released whenever the stock app wants it (it broadcasts CAMERA_APP_START, for reverse and for
  * the camera button) or the gear reads R, and only taken back once the gear is out of R and the
- * stock app has closed its camera. Meanwhile recording goes on from the stock view's frames
- * (Recorder.handOff, state "reversing"). If a release hangs, the process kills itself, which frees the
- * camera too; the service script restarts it. The heartbeat file lets the watchdog service kill
- * a process that stopped responding altogether.
+ * stock app has closed its camera. Nothing is recorded meanwhile (state "reverse"): the recording
+ * ends when the camera is handed over and a new one starts when it's taken back. If a release
+ * hangs, the process kills itself, which frees the camera too; the service script restarts it.
+ * The heartbeat file lets the watchdog service kill a process that stopped responding altogether.
  *
  * The CAMERA_APP_START receiver is a second line: this firmware's ActivityManager skips
  * receivers registered without an app process, so on Gen5W it's the gear polling (which reads 1
@@ -108,12 +108,6 @@ final class Guard extends Thread {
             recorder.stopEncoding();
         }
     };
-    private final Runnable takeBack = new Runnable() {
-        @Override
-        public void run() {
-            recorder.takeBack();
-        }
-    };
     private volatile long lastBlockMs = -SETTLE_MS;
     /** Uptime of the main-thread check-in waiting to run, or 0 if none is. */
     private volatile long mainCheckPostedMs;
@@ -187,10 +181,10 @@ final class Guard extends Thread {
                     if (mainStalled >= REVERSE_MAIN_STALL_MS) {
                         dieForReverse("the main thread has been stuck for " + mainStalled + " ms in reverse");
                     }
-                    if (recorder.isActive() && !recorder.isPassive()) handOff(gearUnknown ? "gear unreadable" : "reverse");
+                    if (recorder.isActive()) handOff(gearUnknown ? "gear unreadable" : "reverse");
                 }
                 if (now < nextStatePoll) {
-                    SystemClock.sleep(recorder.isActive() && !recorder.isPassive() ? POLL_MS : STATE_POLL_MS);
+                    SystemClock.sleep(recorder.isActive() ? POLL_MS : STATE_POLL_MS);
                     continue;
                 }
                 nextStatePoll = now + STATE_POLL_MS;
@@ -218,7 +212,7 @@ final class Guard extends Thread {
                 if (recorder.isActive()) {
                     if (carOff) {
                         release("ignition off");
-                    } else if (recorder.isPreview() != wantPreview && !recorder.isPassive() && !blocked
+                    } else if (recorder.isPreview() != wantPreview && !blocked
                             && (wantPreview || canRecord)) {
                         // Recording starts or stops in the running session: reopening the camera
                         // would blank the overlay and the mirror.
@@ -229,18 +223,10 @@ final class Guard extends Thread {
                     } else if (off) {
                         release("turned off");
                     } else if (blocked) {
-                        if (!recorder.isPassive()) handOff(gear == GEAR_REVERSE ? "reverse" : "stock camera");
-                    } else if (recorder.isPassive() && now >= nextStart) {
-                        nextStart = now + RETRY_MS;
-                        if (stockCameraOpen()) {
-                            Log.i("the stock view still has the camera; waiting");
-                            lastBlockMs = now;  // check again after SETTLE_MS
-                        } else {
-                            main.post(takeBack);
-                        }
+                        handOff(gear == GEAR_REVERSE ? "reverse" : "stock camera");
                     }
                     state = !recorder.isActive() ? (carOff ? "caroff" : off ? offState : blocked ? "reverse" : "starting")
-                            : recorder.isPreview() ? "live" : recorder.isPassive() ? "reversing" : "recording";
+                            : recorder.isPreview() ? "live" : "recording";
                 } else if (carOff) {
                     state = "caroff";
                 } else if (off) {
@@ -267,7 +253,7 @@ final class Guard extends Thread {
                 statusIcon.show(writing);
                 mirror.recording(writing ? MirrorFeed.RECORDING : disabled ? MirrorFeed.DISABLED
                         : !driveMounted ? MirrorFeed.NO_DRIVE : MirrorFeed.OTHER);
-                mirror.allow(!carOff && !blocked && !unsupported && recorder.isActive() && !recorder.isPassive());
+                mirror.allow(!carOff && !blocked && !unsupported && recorder.isActive());
                 if (beat % 4 == 0) {
                     if (mainStalled < MAIN_STALL_MS) {
                         writeHeartbeat(beat / 4);
@@ -278,7 +264,7 @@ final class Guard extends Thread {
                     }
                 }
                 beat++;
-                SystemClock.sleep(recorder.isActive() && !recorder.isPassive() ? POLL_MS : STATE_POLL_MS);
+                SystemClock.sleep(recorder.isActive() ? POLL_MS : STATE_POLL_MS);
             } catch (Throwable t) {
                 Log.e("guard loop", t);
                 SystemClock.sleep(STATE_POLL_MS);
@@ -308,25 +294,22 @@ final class Guard extends Thread {
     void onStockCamera() {
         Log.i("the stock camera app is starting");
         lastBlockMs = SystemClock.uptimeMillis();
-        if (recorder.isActive() && !recorder.isPassive()) handOff("stock camera");
+        if (recorder.isActive()) handOff("stock camera");
     }
 
     /**
-     * Lets go of the camera for the stock view, as release does, but goes on recording the stock
-     * view's frames (Recorder.handOff); a preview just stops.
+     * Stops the recorder for the stock view, as release does, but waits only for the camera
+     * itself: the guide lines, the feed's threads, the encoder and the segment are ended after
+     * that, outside the deadline.
      */
     private synchronized void handOff(String why) {
-        if (!recorder.isActive() || recorder.isPassive()) return;
-        if (recorder.isPreview()) {
-            release(why);
-            return;
-        }
+        if (!recorder.isActive()) return;
         Log.i("handing the camera over: " + why);
         final CountDownLatch released = new CountDownLatch(1);
         main.postAtFrontOfQueue(new Runnable() {
             @Override
             public void run() {
-                recorder.handOff(new Runnable() {
+                recorder.stop(new Runnable() {
                     @Override
                     public void run() {
                         released.countDown();
@@ -460,8 +443,8 @@ final class Guard extends Thread {
     }
 
     /**
-     * What the player app shows: "recording", "reversing" (recording the reverse view's frames),
-     * "live" (the camera runs for the mirror only), "reverse" (the camera is with the reverse view),
+     * What the player app shows: "recording", "live" (the camera runs for the mirror only),
+     * "reverse" (the camera is with the reverse view; nothing is recorded),
      * "caroff" (ignition off), "off", "unsupported" (camera type 6), "nodrive" or "starting", and since when. Written only when
      * it changes, readable by any app. The heartbeat's age says whether the recorder is running.
      */
