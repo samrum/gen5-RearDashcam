@@ -15,7 +15,7 @@ final class RecordCommand {
         if (state == null || "starting".equals(state)) return true;
         boolean acknowledged = configuredEnabled != null ? configuredEnabled == enabled
                 : enabled != "off".equals(state);
-        if (!enabled && ("recording".equals(state) || "reversing".equals(state)))
+        if (!enabled && "recording".equals(state))
             acknowledged = false;
         return !acknowledged;
     }

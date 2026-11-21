@@ -243,10 +243,6 @@ public final class MainActivity extends Activity {
                     color = 0xFFEF4444;
                     text = "Recording since " + Fmt.hm(rec.since);
                     break;
-                case "reversing":
-                    color = 0xFFEF4444;
-                    text = "Recording the reverse camera";
-                    break;
                 case "live":
                     boolean enabled = !Boolean.FALSE.equals(rec.configuredEnabled);
                     color = enabled ? 0xFFF59E0B : 0xFF5B6470;

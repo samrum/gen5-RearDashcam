@@ -35,7 +35,4 @@ final class Native {
 
     /** Hash one strip per ring buffer, batching the uncached reads and pixel loop in native code. */
     static native void hashStrips(long address, long frameBytes, int count, int[] hashes);
-
-    /** From the frame at address (srcWidth pixels a row), the pixel at each of rows × cols, into dst. */
-    static native void copyScaled(long address, int srcWidth, int[] rows, int[] cols, int[] dst);
 }

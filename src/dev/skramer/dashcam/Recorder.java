@@ -20,11 +20,9 @@ import java.util.concurrent.ArrayBlockingQueue;
  * 50 ms). A copier thread copies out the frames kept for the frame rate; the main looper thread
  * converts them to I420 and encodes them. Starting and stopping also happen on the main thread.
  * <p>
- * For reverse ({@link #handOff}) it lets go of the camera but keeps recording: the stock reverse
- * view's own camera session writes its frames to the same ring, at its own size, which is worked
- * out from which parts of the memory change ({@link #findStockSize}); its frames are scaled to
- * the recording size as they're copied. Once the reverse view is done, {@link #takeBack} opens
- * the camera again, into the same recording.
+ * For reverse ({@link #stop(Runnable)}) it lets go of the camera first and then ends the recording;
+ * nothing is recorded while the stock reverse view has the camera. Once it's done, the guard
+ * starts a new recording.
  * <p>
  * For the mirror's live view without recording it can also run a preview session: the camera and
  * the feed, not encoded.
@@ -49,15 +47,6 @@ final class Recorder {
     /** The camera still draws its guide lines for a couple of frames after they're turned off. */
     private static final long GUIDE_LINES_SETTLE_NS = 300_000_000L;
     private static final long STATS_MS = 30_000;
-    /**
-     * Frame sizes the stock view might use (the analog camera's is 1140x720), and how the camera
-     * memory is sampled to find out which: 16 pixels from the middle of every 16 KiB, read
-     * FIND_PASSES times FIND_PASS_MS apart.
-     */
-    private static final int[][] STOCK_SIZES = {{1140, 720}, {1280, 720}, {1920, 720}, {1780, 720}, {1420, 538},
-            {1280, 538}, {1280, 480}, {960, 720}, {760, 480}, {720, 480}};
-    private static final int FIND_BLOCK = 16384, FIND_PROBE = 16, FIND_PASSES = 6;
-    private static final long FIND_PASS_MS = 60;
 
     private final Config config;
     private final Handler handler;
@@ -83,14 +72,6 @@ final class Recorder {
     private long statsStartMs, convertNs, copiesAtStats, copyNsAtStats;
     private int encoded;
     private final Perf perf = new Perf();
-    /** Recording the stock reverse view's frames (we don't have the camera). */
-    private volatile boolean passive;
-    /** The thread looking for the stock view's frames, while passive and there's no feed. */
-    private Thread finder;
-    /** This reverse period, for its summary: when it started, frames encoded, the size found. */
-    private long passiveSinceMs, passiveFirstFrameMs;
-    private int passiveEncoded;
-    private String passiveSize;
     /** Copies by feeds that have ended, for the stats. */
     private long endedCopies, endedCopyNs;
     /** The session: a preview (the camera without recording), and its size. Read from other threads. */
@@ -104,7 +85,7 @@ final class Recorder {
     private final Runnable keepLinesOff = new Runnable() {
         @Override
         public void run() {
-            if (!active || passive || guideLines == null) return;
+            if (!active || guideLines == null) return;
             if (guideLines.keepOff() && ++linesReasked >= 5) {
                 Log.w("the guide lines keep coming back on; giving up for this session");
                 return;
@@ -126,9 +107,8 @@ final class Recorder {
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
-                        // Keeps the camera: the mirror may be showing it. Reversing, it's the stock view's.
-                        if (passive) stop();
-                        else stopEncoding();
+                        // Keeps the camera: the mirror may be showing it.
+                        stopEncoding();
                     }
                 });
             }
@@ -146,14 +126,9 @@ final class Recorder {
         return writer.lastWriteMs();
     }
 
-    /** True while recording (or previewing), with the camera or from the stock view. Read from other threads. */
+    /** True while recording (or previewing). Read from other threads. */
     boolean isActive() {
         return active;
-    }
-
-    /** True while recording the stock reverse view's frames, without the camera. */
-    boolean isPassive() {
-        return passive;
     }
 
     /** True while running a preview session (if active). */
@@ -186,7 +161,6 @@ final class Recorder {
         ySize = width * height;
         cSize = ySize / 4;
         noPicture = null;
-        passive = false;
         try {
             if (ram == null) ram = CameraRam.map();
             if (!ram.fits(width, height)) throw new IllegalStateException(CameraRam.SLOTS + " " + size + " frames don't fit");
@@ -213,7 +187,7 @@ final class Recorder {
      * on), without touching the camera: reopening it blanks the overlay and the mirror.
      */
     void startEncoding() {
-        if (!active || !preview || passive) return;
+        if (!active || !preview) return;
         try {
             startEncoder();
         } catch (Throwable t) {
@@ -233,7 +207,7 @@ final class Recorder {
      * was turned off), for the mirror; the guard releases it if nothing wants it.
      */
     void stopEncoding() {
-        if (!active || preview || passive) return;
+        if (!active || preview) return;
         releaseEncoder();
         preview = true;
         Log.i("recording stopped; the camera goes on for the live view");
@@ -276,7 +250,7 @@ final class Recorder {
                 if (camera != null && camera == opened[0]) stop();  // the guard restarts it
             }
         });
-        feed = new Feed(width, height, false);
+        feed = new Feed();
         camera.start(width, height);
         skipUntilNs = hidLines ? System.nanoTime() + GUIDE_LINES_SETTLE_NS : 0;
         Log.i("camera started");
@@ -286,75 +260,29 @@ final class Recorder {
         }
     }
 
-    /** Releases the camera first, so the stock reverse view can open it as soon as possible. */
     void stop() {
+        stop(null);
+    }
+
+    /**
+     * Releases the camera first, so the stock reverse view can open it as soon as possible;
+     * released, if given, runs right then. Then turns the guide lines back on for the reverse view
+     * and ends the feed, the encoder and the segment being written.
+     */
+    void stop(Runnable released) {
         boolean was = active;
         active = false;
-        endPassive();
         if (feed != null) feed.running = false;
         if (camera != null) {
             camera.release();
             camera = null;
         }
-        if (guideLines != null) guideLines.restore();  // for the reverse view
-        endFeed();
-        releaseEncoder();
-        handler.removeCallbacks(keepLinesOff);
-        if (was) Log.i("camera released");
-    }
-
-    /**
-     * For reverse: lets go of the camera (released runs as soon as it has), turns the guide lines
-     * back on, and goes on recording the stock view's frames. A preview just stops.
-     */
-    void handOff(Runnable released) {
-        if (!active || preview || passive || camera == null) {
-            stop();
-            released.run();
-            return;
-        }
-        if (feed != null) feed.running = false;
-        camera.release();
-        camera = null;
-        passiveSinceMs = SystemClock.uptimeMillis();
-        passiveFirstFrameMs = 0;
-        passiveEncoded = 0;
-        passiveSize = null;
-        // Publish ownership loss before waking the faster guard. It must not enqueue
-        // another handoff while this thread is still finishing feed cleanup.
-        passive = true;
-        released.run();
+        if (released != null) released.run();
         handler.removeCallbacks(keepLinesOff);
         if (guideLines != null) guideLines.restore();
         endFeed();
-        Log.i("camera released; recording the reverse view: looking for its frames");
-        findStockFrames();
-    }
-
-    /** After reverse: opens the camera again, into the same recording. If it can't, stops. */
-    void takeBack() {
-        if (!active || !passive) return;
-        endPassive();
-        endFeed();
-        try {
-            openCamera();
-            feed.start();
-        } catch (Throwable t) {
-            Log.e("can't take the camera back", t);
-            stop();
-        }
-    }
-
-    /** Ends recording the reverse view, with a summary of it. */
-    private void endPassive() {
-        if (!passive) return;
-        passive = false;
-        finder = null;  // it checks
-        long secs = (SystemClock.uptimeMillis() - passiveSinceMs) / 1000;
-        Log.i(String.format(Locale.US, "reverse view: %d s, %s, %d frames recorded (%.1f fps)%s", secs,
-                passiveSize != null ? "its frames " + passiveSize : "no frames found", passiveEncoded,
-                secs > 0 ? passiveEncoded / (float) secs : 0f,
-                passiveFirstFrameMs > 0 ? ", first after " + (passiveFirstFrameMs - passiveSinceMs) + " ms" : ""));
+        releaseEncoder();
+        if (was) Log.i("camera released");
     }
 
     private void endFeed() {
@@ -363,103 +291,6 @@ final class Recorder {
         endedCopies += feed.copies;
         endedCopyNs += feed.copyNs;
         feed = null;
-    }
-
-    /** Starts looking for the stock view's frames; once found, they're recorded. */
-    private void findStockFrames() {
-        final Thread t = new Thread("camera find") {
-            @Override
-            public void run() {
-                boolean reported = false;
-                while (passive && finder == this) {
-                    try {
-                        final int[] found = findStockSize();
-                        if (found != null && found[0] > 0) {
-                            handler.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    recordStock(found[0], found[1]);
-                                }
-                            });
-                            return;
-                        }
-                        if (found != null && !reported) {
-                            Log.w(String.format(Locale.US, "the reverse view writes frames, but no usual size fits (changing up to 0x%x)", -found[0]));
-                            reported = true;
-                        }
-                    } catch (Throwable e) {
-                        Log.e("looking for the reverse view's frames", e);
-                        return;
-                    }
-                    SystemClock.sleep(250);
-                }
-            }
-        };
-        t.setDaemon(true);
-        finder = t;
-        t.start();
-    }
-
-    /** On the main thread: records the stock view's width × height frames, scaled. */
-    private void recordStock(int w, int h) {
-        if (!active || !passive || feed != null) return;
-        finder = null;
-        passiveSize = w + "x" + h;
-        Log.i("recording the reverse view's " + passiveSize + " frames, scaled to " + size);
-        feed = new Feed(w, h, true);
-        feed.start();
-    }
-
-    /**
-     * The stock view's frame size, from about a third of a second of which parts of the camera
-     * memory change: the hardware writes a ring of four frames from the start, so the size is the
-     * one for which every change has its counterparts in the other three frames, and nothing
-     * changes past the fourth. Null if nothing changes; {-reach, 0} if something does but no
-     * size fits.
-     */
-    private int[] findStockSize() {
-        int blocks = (int) (ram.length / FIND_BLOCK);
-        int[] probe = new int[FIND_PROBE], hashes = new int[blocks];
-        boolean[] changed = new boolean[blocks];
-        int last = -1;
-        for (int pass = 0; pass < FIND_PASSES; pass++) {
-            for (int b = 0; b < blocks; b++) {
-                ram.read((long) b * FIND_BLOCK + FIND_BLOCK / 2, probe, 0, FIND_PROBE);
-                int x = 1;
-                for (int p : probe) x = 31 * x + p;
-                if (pass > 0 && x != hashes[b]) {
-                    changed[b] = true;
-                    last = Math.max(last, b);
-                }
-                hashes[b] = x;
-            }
-            SystemClock.sleep(FIND_PASS_MS);
-        }
-        if (last < 0) return null;
-        int[] best = null;
-        double bestScore = 0.8;  // at least this many of the changes accounted for
-        for (int[] s : STOCK_SIZES) {
-            long frame = (long) s[0] * s[1] * 4;
-            if (frame * CameraRam.SLOTS > ram.length || (long) last * FIND_BLOCK > frame * CameraRam.SLOTS + FIND_BLOCK) continue;
-            int counted = 0, consistent = 0;
-            for (int b = 0; b <= last; b++) {
-                if (!changed[b]) continue;
-                counted++;
-                long rel = ((long) b * FIND_BLOCK + FIND_BLOCK / 2) % frame;
-                boolean all = true;
-                for (int k = 0; k < CameraRam.SLOTS && all; k++) {
-                    int c = (int) ((k * frame + rel) / FIND_BLOCK);
-                    all = (c < blocks && changed[c]) || (c > 0 && changed[c - 1]) || (c + 1 < blocks && changed[c + 1]);
-                }
-                if (all) consistent++;
-            }
-            double score = counted == 0 ? 0 : consistent / (double) counted;
-            if (score > bestScore) {
-                bestScore = score;
-                best = s;
-            }
-        }
-        return best != null ? best : new int[] {-(last + 1) * FIND_BLOCK, 0};
     }
 
     private void configureEncoder() {
@@ -477,19 +308,16 @@ final class Recorder {
     /** A frame copied out by the feed, on the main thread. Gives its buffer back either way. */
     private void onFrame(Feed from, int[] argb, long ptsUs) {
         try {
-            if (!active || from != feed || (!from.stock && System.nanoTime() < skipUntilNs)) return;
+            if (!active || from != feed || System.nanoTime() < skipUntilNs) return;
             String why = noPicture(argb);
             if (why == null ? noPicture != null : !why.equals(noPicture)) {
                 Log.i(why != null ? why + "; not recording until there is one" : "the camera's picture is back");
                 noPicture = why;
             }
-            if (mirrorFeed != null && why == null && !from.stock) mirrorFeed.publish(argb, width, height);
+            if (mirrorFeed != null && why == null) mirrorFeed.publish(argb, width, height);
             if (encoder != null && why == null) {
                 encode(argb, ptsUs);
                 drain();
-                if (from.stock) {
-                    if (passiveEncoded++ == 0) passiveFirstFrameMs = SystemClock.uptimeMillis();
-                }
                 logStats();
             }
         } finally {
@@ -584,8 +412,8 @@ final class Recorder {
         long copies = endedCopies + (f != null ? f.copies : 0), copyNs = endedCopyNs + (f != null ? f.copyNs : 0);
         long c = copies - copiesAtStats;
         String cpu = perf.sample();
-        Log.i(String.format(Locale.US, "%.1f fps%s, copy %.1f ms/frame, conversion %.1f ms/frame, %d dropped%s%s",
-                encoded * 1000f / (now - statsStartMs), passive ? " (reverse view)" : "",
+        Log.i(String.format(Locale.US, "%.1f fps, copy %.1f ms/frame, conversion %.1f ms/frame, %d dropped%s%s",
+                encoded * 1000f / (now - statsStartMs),
                 c == 0 ? 0 : (copyNs - copyNsAtStats) / 1e6 / c, convertNs / 1e6 / encoded, dropped,
                 f != null ? ", " + f.stats() : "", cpu != null ? "; CPU: " + cpu : ""));
         statsStartMs = now;
@@ -640,18 +468,11 @@ final class Recorder {
     }
 
     /**
-     * One camera session's frames out of RAM: the watcher finds completed buffers, the copier
-     * copies out the ones kept and posts them to the main thread. The ring is of srcWidth ×
-     * srcHeight frames; frames come out at the session's size, scaled (nearest pixel) if
-     * they're another size, reading only the rows needed.
+     * One camera session's frames out of RAM, at the session's size: the watcher finds completed
+     * buffers, the copier copies out the ones kept and posts them to the main thread.
      */
     private final class Feed {
-        private final int srcWidth, srcHeight;
-        private final long frameBytes;
-        /** The stock reverse view's frames, not ours. */
-        final boolean stock;
-        /** Source column and row of each output pixel, if scaled; else null. */
-        private final int[] xs, ys;
+        private final long frameBytes = (long) width * height * 4;
         final ArrayBlockingQueue<int[]> free = new ArrayBlockingQueue<>(FRAME_BUFFERS);
         private final Thread watcher, copier;
         volatile boolean running = true;
@@ -666,19 +487,7 @@ final class Recorder {
         /** Copier only, read for the stats: frames copied out and the time it took. */
         volatile long copies, copyNs;
 
-        Feed(int srcWidth, int srcHeight, boolean stock) {
-            this.srcWidth = srcWidth;
-            this.srcHeight = srcHeight;
-            this.stock = stock;
-            frameBytes = (long) srcWidth * srcHeight * 4;
-            if (srcWidth == width && srcHeight == height) {
-                xs = ys = null;
-            } else {
-                xs = new int[width];
-                ys = new int[height];
-                for (int c = 0; c < width; c++) xs[c] = (2 * c + 1) * srcWidth / (2 * width);
-                for (int r = 0; r < height; r++) ys[r] = (2 * r + 1) * srcHeight / (2 * height);
-            }
+        Feed() {
             for (int i = 0; i < FRAME_BUFFERS; i++) free.add(new int[width * height]);
             watcher = new Thread("camera watch") {
                 @Override
@@ -738,8 +547,8 @@ final class Recorder {
          * Right after a buffer starts, the next can't for about a frame, so it waits longer.
          */
         private void watch() {
-            long offset = ((long) (srcHeight / 16) * srcWidth + srcWidth / 3) * 4;
-            int n = srcWidth / 3;
+            long offset = ((long) (height / 16) * width + width / 3) * 4;
+            int n = width / 3;
             int[] strip = new int[n];
             int[] hashes = new int[CameraRam.SLOTS];
             int[] last = new int[CameraRam.SLOTS];
@@ -796,13 +605,11 @@ final class Recorder {
          * target tick, and the target advances by exactly n, so the cadence stays even. A frame
          * whose buffer started being written again during the copy is torn, and dropped.
          * <p>
-         * If the frames stop: for our camera, it's restarted after a while; for the stock view's
-         * (reverse is over, or it changed its size), the search for them starts again.
+         * If the frames stop, the camera is restarted after a while.
          */
         private void copy() {
             long seen = 0, lastNs = System.nanoTime();
             boolean stalled = false;
-            int[] row = xs != null ? new int[srcWidth] : null;
             while (running) {
                 int slot;
                 long at, startsBefore;
@@ -814,19 +621,6 @@ final class Recorder {
                             // Checks running.
                         }
                         long quiet = (System.nanoTime() - lastNs) / 1_000_000;
-                        if (stock && running && quiet >= STALL_MS) {
-                            Log.i("the reverse view's frames stopped");
-                            running = false;
-                            handler.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    if (feed != Feed.this || !passive) return;
-                                    endFeed();
-                                    findStockFrames();
-                                }
-                            });
-                            return;
-                        }
                         if (!stalled && quiet >= STALL_MS) {
                             Log.i("no new frames from the camera; not recording until there are");
                             stalled = true;
@@ -863,17 +657,7 @@ final class Recorder {
                     continue;
                 }
                 long t0 = System.nanoTime();
-                long base = slot * frameBytes;
-                if (xs == null) {
-                    ram.read(base, buf, 0, buf.length);
-                } else if (Native.loaded) {
-                    Native.copyScaled(ram.address(base, frameBytes), srcWidth, ys, xs, buf);
-                } else {
-                    for (int r = 0, o = 0; r < ys.length; r++) {
-                        ram.read(base + (long) ys[r] * srcWidth * 4, row, 0, srcWidth);
-                        for (int x : xs) buf[o++] = row[x];
-                    }
-                }
+                ram.read(slot * frameBytes, buf, 0, buf.length);
                 copyNs += System.nanoTime() - t0;
                 copies++;
                 boolean rewritten;
